@@ -1,0 +1,70 @@
+# Bac à sable du circuit d'adhésion, sur la Raspberry Pi.
+#
+#   http://<pi>:8504/bac-a-sable/  Discord simulé et boîte mail de test
+#   http://<pi>:8504/wp-admin/     vue du bureau (identifiants dans IDENTIFIANTS.txt)
+#   http://<pi>:8505/              copie du site branchée sur ce WordPress
+#
+# Rien n'en sort : Discord et les e-mails sont simulés par mu/bac-a-sable.php.
+services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+      MARIADB_DATABASE: wp
+      MARIADB_USER: wp
+      MARIADB_PASSWORD: bac-a-sable
+    volumes:
+      - db:/var/lib/mysql
+
+  wp:
+    image: wordpress:php8.2-apache
+    restart: unless-stopped
+    depends_on: [db]
+    ports:
+      - "8504:80"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wp
+      WORDPRESS_DB_PASSWORD: bac-a-sable
+      WORDPRESS_DB_NAME: wp
+      # L'adresse suit celle tapée dans le navigateur : le bac à sable marche
+      # aussi bien en réseau local que par Tailscale.
+      WORDPRESS_CONFIG_EXTRA: |
+        $$bac_hote = isset($$_SERVER['HTTP_X_FORWARDED_HOST']) ? $$_SERVER['HTTP_X_FORWARDED_HOST'] : (isset($$_SERVER['HTTP_HOST']) ? $$_SERVER['HTTP_HOST'] : 'localhost:8504');
+        define('WP_HOME', 'http://' . $$bac_hote);
+        define('WP_SITEURL', 'http://' . $$bac_hote);
+    volumes:
+      - wp:/var/www/html
+      - ./plugin:/var/www/html/wp-content/plugins/nyassobi-wp-plugin:ro
+      - ./mu:/var/www/html/wp-content/mu-plugins:ro
+
+  cli:
+    image: wordpress:cli-php8.2
+    depends_on: [wp]
+    user: "33:33"
+    environment:
+      WP_CLI_CACHE_DIR: /tmp/wp-cli-cache
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wp
+      WORDPRESS_DB_PASSWORD: bac-a-sable
+      WORDPRESS_DB_NAME: wp
+    volumes:
+      - wp:/var/www/html
+      - ./plugin:/var/www/html/wp-content/plugins/nyassobi-wp-plugin:ro
+      - ./mu:/var/www/html/wp-content/mu-plugins:ro
+    entrypoint: ["sleep", "infinity"]
+
+  site:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on: [wp]
+    ports:
+      - "8505:80"
+    volumes:
+      - ./www:/srv:ro
+      - ./site-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  db: {}
+  wp: {}

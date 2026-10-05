@@ -47,6 +47,19 @@ final class Nyassobi_Membership
     private const META_STATUS = '_nyassobi_status';
     private const META_VOTES = '_nyassobi_votes';
     private const META_DISCORD_MESSAGE = '_nyassobi_discord_message';
+    private const META_PARENTAL_FILE = '_nyassobi_parental_file';
+    private const META_PARENTAL_MIME = '_nyassobi_parental_mime';
+
+    /** Signed parental authorization: a scan or a phone photo. */
+    private const PARENTAL_MAX_BYTES = 5 * 1024 * 1024;
+    private const PARENTAL_TYPES = [
+        'application/pdf' => 'pdf',
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+        'image/heic' => 'heic',
+        'image/heif' => 'heif',
+    ];
 
     private const STATUS_PENDING = 'pending';
     private const STATUS_ACCEPTED = 'accepted';
@@ -78,6 +91,8 @@ final class Nyassobi_Membership
         add_action('admin_menu', [$this, 'register_settings_page']);
         add_action('add_meta_boxes', [$this, 'register_metabox']);
         add_action('admin_post_nyassobi_membership_action', [$this, 'handle_admin_action']);
+        add_action('admin_post_nyassobi_membership_file', [$this, 'download_parental_file']);
+        add_action('before_delete_post', [$this, 'delete_parental_file']);
         add_filter('manage_' . self::POST_TYPE . '_posts_columns', [$this, 'admin_columns']);
         add_action('manage_' . self::POST_TYPE . '_posts_custom_column', [$this, 'render_admin_column'], 10, 2);
         add_action('graphql_register_types', [$this, 'register_mutation']);
@@ -377,11 +392,38 @@ final class Nyassobi_Membership
 
     public function register_mutation(): void
     {
-        // Without Discord there is nobody to vote: the mutation is simply not
-        // exposed, and the front-end falls back to the old signup form.
-        if (! function_exists('register_graphql_mutation') || ! $this->is_configured()) {
+        if (! function_exists('register_graphql_mutation')) {
             return;
         }
+
+        // Lets the front-end know before anyone fills the form in whether
+        // requests can be received; otherwise it points to the old form.
+        register_graphql_field(
+            'RootQuery',
+            'nyassobiMembershipOpen',
+            [
+                'type' => ['non_null' => 'Boolean'],
+                'description' => __('Vrai quand les demandes d\'adhésion du site sont reçues et soumises au CA.', 'nyassobi-wp-plugin'),
+                'resolve' => fn (): bool => $this->is_configured(),
+            ]
+        );
+
+        // Without Discord there is nobody to vote: the mutation is simply not exposed.
+        if (! $this->is_configured()) {
+            return;
+        }
+
+        register_graphql_input_type(
+            'NyassobiUploadInput',
+            [
+                'description' => __('Fichier envoyé en base64.', 'nyassobi-wp-plugin'),
+                'fields' => [
+                    'fileName' => ['type' => ['non_null' => 'String']],
+                    'mimeType' => ['type' => ['non_null' => 'String']],
+                    'base64' => ['type' => ['non_null' => 'String']],
+                ],
+            ]
+        );
 
         register_graphql_mutation(
             'submitNyassobiMembership',
@@ -395,6 +437,10 @@ final class Nyassobi_Membership
                     'reducedRate' => ['type' => ['non_null' => 'Boolean']],
                     'acceptsRules' => ['type' => ['non_null' => 'Boolean']],
                     'acceptsPrivacy' => ['type' => ['non_null' => 'Boolean']],
+                    'parentalAuthorization' => [
+                        'type' => 'NyassobiUploadInput',
+                        'description' => __('Autorisation parentale signée (PDF ou photo), obligatoire pour les mineurs.', 'nyassobi-wp-plugin'),
+                    ],
                 ],
                 'outputFields' => [
                     'success' => [
@@ -446,11 +492,22 @@ final class Nyassobi_Membership
             throw new $error(__('Il faut accepter les statuts, le règlement et le traitement des données.', 'nyassobi-wp-plugin'));
         }
 
+        // Checked before anything is stored, so a bad file costs nothing.
+        $parental = null;
+        if ($age < 18) {
+            $parental = self::decode_upload($input['parentalAuthorization'] ?? null);
+            if (is_string($parental)) {
+                throw new $error($parental);
+            }
+        }
+
         // A few requests per hour and per address are plenty for a human.
         $ip = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '';
         $rate_key = 'nyassobi_join_' . md5(wp_salt('auth') . $ip);
         $attempts = (int) get_transient($rate_key);
-        if ($attempts >= self::SUBMISSIONS_PER_HOUR) {
+        // Filterable so a test environment can submit as often as it needs.
+        $limit = (int) apply_filters('nyassobi_membership_submissions_per_hour', self::SUBMISSIONS_PER_HOUR);
+        if ($attempts >= $limit) {
             throw new $error(__('Trop de demandes envoyées depuis cette connexion. Réessaie dans une heure.', 'nyassobi-wp-plugin'));
         }
         set_transient($rate_key, $attempts + 1, HOUR_IN_SECONDS);
@@ -484,6 +541,11 @@ final class Nyassobi_Membership
         update_post_meta($post_id, self::META_STATUS, self::STATUS_PENDING);
         update_post_meta($post_id, self::META_VOTES, []);
 
+        if (is_array($parental) && ! $this->store_parental_file($post_id, $parental)) {
+            wp_delete_post($post_id, true);
+            return ['success' => false, 'message' => __('L\'autorisation parentale n\'a pas pu être enregistrée. Réessaie plus tard.', 'nyassobi-wp-plugin')];
+        }
+
         $message_id = $this->post_discord_message($post_id);
         if (null === $message_id) {
             // Without the Discord message nobody can vote: better to tell the
@@ -511,6 +573,121 @@ final class Nyassobi_Membership
             'success' => true,
             'message' => __('Le conseil d\'administration va étudier ta demande. Tu recevras sa réponse par e-mail, puis le lien pour régler ta cotisation.', 'nyassobi-wp-plugin'),
         ];
+    }
+
+    /* ------------------------------------------------------------------
+     * Parental authorization
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Decodes and checks an uploaded file. The type is read from the bytes
+     * themselves, never trusted from the browser.
+     *
+     * @param mixed $upload
+     *
+     * @return array{bytes:string,mime:string}|string The file, or an error message.
+     */
+    public static function decode_upload($upload)
+    {
+        if (! is_array($upload) || '' === (string) ($upload['base64'] ?? '')) {
+            return __('Comme tu as moins de 18 ans, il faut joindre l\'autorisation parentale signée.', 'nyassobi-wp-plugin');
+        }
+        // A data: URL prefix is tolerated, browsers produce one.
+        $data = preg_replace('/^data:[^,]*,/', '', (string) $upload['base64']) ?? '';
+        if (strlen($data) > (int) ceil(self::PARENTAL_MAX_BYTES * 4 / 3) + 8) {
+            return __('L\'autorisation parentale dépasse 5 Mo.', 'nyassobi-wp-plugin');
+        }
+        $bytes = base64_decode($data, true);
+        if (false === $bytes || '' === $bytes) {
+            return __('Le fichier de l\'autorisation parentale est illisible.', 'nyassobi-wp-plugin');
+        }
+        if (strlen($bytes) > self::PARENTAL_MAX_BYTES) {
+            return __('L\'autorisation parentale dépasse 5 Mo.', 'nyassobi-wp-plugin');
+        }
+        $mime = (new \finfo(FILEINFO_MIME_TYPE))->buffer($bytes) ?: '';
+        if (! isset(self::PARENTAL_TYPES[$mime])) {
+            return __('L\'autorisation parentale doit être un PDF ou une photo (JPEG, PNG, WebP, HEIC).', 'nyassobi-wp-plugin');
+        }
+
+        return ['bytes' => $bytes, 'mime' => $mime];
+    }
+
+    /**
+     * Folder outside the media library. Apache refuses direct access, and the
+     * random file names cannot be guessed on servers that ignore .htaccess.
+     */
+    private static function private_dir(): string
+    {
+        $dir = trailingslashit(wp_upload_dir()['basedir']) . 'nyassobi-prive';
+        if (! is_dir($dir)) {
+            wp_mkdir_p($dir);
+        }
+        if (! file_exists($dir . '/.htaccess')) {
+            file_put_contents($dir . '/.htaccess', "Require all denied\nDeny from all\n");
+        }
+        if (! file_exists($dir . '/index.php')) {
+            file_put_contents($dir . '/index.php', "<?php\n// Silence.\n");
+        }
+
+        return $dir;
+    }
+
+    /**
+     * @param array{bytes:string,mime:string} $file
+     */
+    private function store_parental_file(int $post_id, array $file): bool
+    {
+        $name = bin2hex(random_bytes(16)) . '.' . self::PARENTAL_TYPES[$file['mime']];
+        if (false === file_put_contents(self::private_dir() . '/' . $name, $file['bytes'])) {
+            return false;
+        }
+        update_post_meta($post_id, self::META_PARENTAL_FILE, $name);
+        update_post_meta($post_id, self::META_PARENTAL_MIME, $file['mime']);
+
+        return true;
+    }
+
+    private static function parental_path(int $post_id): ?string
+    {
+        $name = (string) get_post_meta($post_id, self::META_PARENTAL_FILE, true);
+        if (! preg_match('/^[a-f0-9]{32}\.[a-z]{3,4}$/', $name)) {
+            return null;
+        }
+        $path = self::private_dir() . '/' . $name;
+
+        return is_file($path) ? $path : null;
+    }
+
+    /** The document goes with the request, whatever the reason it is deleted. */
+    public function delete_parental_file(int $post_id): void
+    {
+        if (self::POST_TYPE !== get_post_type($post_id)) {
+            return;
+        }
+        $path = self::parental_path($post_id);
+        if (null !== $path) {
+            wp_delete_file($path);
+        }
+    }
+
+    public function download_parental_file(): void
+    {
+        $post_id = isset($_GET['post']) ? (int) $_GET['post'] : 0;
+        if (! current_user_can(self::CAPABILITY) || ! check_admin_referer('nyassobi_membership_file_' . $post_id)) {
+            wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
+        }
+        $path = self::parental_path($post_id);
+        if (null === $path) {
+            wp_die(esc_html__('Document introuvable.', 'nyassobi-wp-plugin'));
+        }
+        $mime = (string) get_post_meta($post_id, self::META_PARENTAL_MIME, true);
+        nocache_headers();
+        header('Content-Type: ' . (isset(self::PARENTAL_TYPES[$mime]) ? $mime : 'application/octet-stream'));
+        header('Content-Disposition: inline; filename="autorisation-parentale-' . $post_id . '.' . pathinfo($path, PATHINFO_EXTENSION) . '"');
+        header('X-Content-Type-Options: nosniff');
+        header('Content-Length: ' . filesize($path));
+        readfile($path);
+        exit;
     }
 
     private function find_pending_by_email_hash(string $hash): bool
@@ -887,10 +1064,8 @@ final class Nyassobi_Membership
                 $settings['payment_url'] ?? '',
             ];
             if (null !== $age && $age < 18) {
-                $main = Nyassobi_WP_Plugin::get_settings();
                 $lines[] = '';
-                $lines[] = __('Comme tu as moins de 18 ans, il faut aussi nous renvoyer l\'autorisation parentale signée, en réponse à cet e-mail :', 'nyassobi-wp-plugin');
-                $lines[] = $main['parental_agreement_url'] ?? '';
+                $lines[] = __('Nous avons bien ton autorisation parentale : le bureau la vérifie au moment de finaliser ton adhésion.', 'nyassobi-wp-plugin');
             }
             array_push($lines, '', __('Bienvenue dans la bande,', 'nyassobi-wp-plugin'), __('L\'équipe Nyassobi', 'nyassobi-wp-plugin'));
             $this->send_mail($email, __('Nyassobi : ta demande d\'adhésion est acceptée', 'nyassobi-wp-plugin'), $lines);
@@ -1039,7 +1214,7 @@ final class Nyassobi_Membership
             __('Pseudo', 'nyassobi-wp-plugin') => get_post_meta($id, self::META_PSEUDO, true),
             __('Prénom', 'nyassobi-wp-plugin') => get_post_meta($id, self::META_FIRST_NAME, true),
             __('Nom', 'nyassobi-wp-plugin') => get_post_meta($id, self::META_LAST_NAME, true),
-            __('Date de naissance', 'nyassobi-wp-plugin') => $birth_date . (null !== $age ? sprintf(' (%d ans%s)', $age, $age < 18 ? ', autorisation parentale à demander' : '') : ''),
+            __('Date de naissance', 'nyassobi-wp-plugin') => $birth_date . (null !== $age ? sprintf(' (%d ans%s)', $age, $age < 18 ? ', mineur·e' : '') : ''),
             __('E-mail', 'nyassobi-wp-plugin') => get_post_meta($id, self::META_EMAIL, true),
             __('Tarif', 'nyassobi-wp-plugin') => '1' === get_post_meta($id, self::META_REDUCED_RATE, true) ? __('Réduit (15 €)', 'nyassobi-wp-plugin') : __('Normal (20 €)', 'nyassobi-wp-plugin'),
             __('Statut', 'nyassobi-wp-plugin') => $this->status_label($status),
@@ -1048,6 +1223,16 @@ final class Nyassobi_Membership
         echo '<table class="form-table" role="presentation"><tbody>';
         foreach ($rows as $label => $value) {
             printf('<tr><th scope="row">%s</th><td>%s</td></tr>', esc_html($label), esc_html((string) $value));
+        }
+        if (null !== $age && $age < 18) {
+            $file_url = wp_nonce_url(admin_url('admin-post.php?action=nyassobi_membership_file&post=' . $id), 'nyassobi_membership_file_' . $id);
+            printf(
+                '<tr><th scope="row">%s</th><td>%s</td></tr>',
+                esc_html__('Autorisation parentale', 'nyassobi-wp-plugin'),
+                null !== self::parental_path($id)
+                    ? sprintf('<a class="button" href="%s" target="_blank" rel="noopener">%s</a>', esc_url($file_url), esc_html__('Ouvrir le document à vérifier', 'nyassobi-wp-plugin'))
+                    : esc_html__('Document manquant', 'nyassobi-wp-plugin')
+            );
         }
         echo '</tbody></table>';
 

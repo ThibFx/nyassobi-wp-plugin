@@ -1,0 +1,2 @@
+# Les scripts lancés sur la Pi doivent garder des fins de ligne Unix, même extraits sous Windows.
+*.sh text eol=lf
