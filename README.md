@@ -12,6 +12,7 @@ Plugin WordPress leger qui centralise les reglages necessaires au front-end head
 Ouvrir **Reglages > Parametres Nyassobi** puis renseigner :
 
 - Adresse email de contact.
+- Adresse d'expédition des e-mails (en `@nyassobi.fr`, pour ne pas partir en spam).
 - URL du formulaire d'inscription.
 - URL de l'accord parental.
 - URL des statuts associatifs.

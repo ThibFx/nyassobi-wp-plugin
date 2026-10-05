@@ -584,6 +584,15 @@ JS;
 
         // Compose headers with Reply-To so the team can answer quickly.
         $headers = ['Content-Type: text/plain; charset=UTF-8'];
+
+        // Without an explicit sender, WordPress writes as "WordPress
+        // <wordpress@admin.nyassobi.fr>": a subdomain with no SPF record,
+        // which mail providers tend to file as spam.
+        $sender = isset($settings['sender_email']) ? sanitize_email((string) $settings['sender_email']) : '';
+        if (is_email($sender)) {
+            $headers[] = sprintf('From: Nyassobi <%s>', $sender);
+        }
+
         if ($email) {
             $reply_to_name = $fullname !== '' ? $fullname : $email;
             $headers[] = sprintf('Reply-To: %s <%s>', $reply_to_name, $email);
@@ -835,6 +844,11 @@ JS;
             'contact_email' => [
                 'label' => __('Adresse email de contact', 'nyassobi-wp-plugin'),
                 'description' => __('Email principal pour les demandes entrantes.', 'nyassobi-wp-plugin'),
+                'type' => 'email',
+            ],
+            'sender_email' => [
+                'label' => __('Adresse d\'expédition des e-mails', 'nyassobi-wp-plugin'),
+                'description' => __('Adresse en @nyassobi.fr utilisée comme expéditeur (ex. contact@nyassobi.fr). Sans elle, les e-mails partent au nom de « WordPress » et finissent souvent en spam.', 'nyassobi-wp-plugin'),
                 'type' => 'email',
             ],
             'intro_text_nyassobi' => [
