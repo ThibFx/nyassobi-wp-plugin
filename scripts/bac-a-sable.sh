@@ -20,11 +20,13 @@ COPYFILE_DISABLE=1 tar --no-xattrs -czf "$ARCHIVE" nyassobi-wp-plugin.php includ
 scp -q "$ARCHIVE" "$HOTE:/tmp/bac-a-sable.tgz"
 rm -f "$ARCHIVE"
 
-# Le plugin est remplacé en entier, pour qu'un fichier supprimé ici le soit aussi là-bas.
+# Le contenu du plugin est remplacé en entier (un fichier supprimé ici l'est
+# aussi là-bas), mais pas les dossiers eux-mêmes : les conteneurs les montent,
+# et un dossier recréé leur resterait invisible.
 ssh "$HOTE" "set -e
-  mkdir -p ~/$DOSSIER && cd ~/$DOSSIER
+  mkdir -p ~/$DOSSIER/plugin ~/$DOSSIER/mu && cd ~/$DOSSIER
   rm -rf .arrivee && mkdir .arrivee && tar -xzf /tmp/bac-a-sable.tgz -C .arrivee && rm -f /tmp/bac-a-sable.tgz
-  rm -rf plugin mu && mkdir plugin
+  find plugin mu -mindepth 1 -delete
   mv .arrivee/nyassobi-wp-plugin.php .arrivee/includes plugin/
   cp -r .arrivee/bac-a-sable/. . && rm -rf .arrivee
   bash installer.sh"

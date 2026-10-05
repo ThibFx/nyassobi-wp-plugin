@@ -128,3 +128,23 @@ mutation Join($input: SubmitNyassobiMembershipInput!) {
 Champs de `input` : `pseudo`, `firstName`, `lastName`, `birthDate` (`AAAA-MM-JJ`), `email`,
 `reducedRate`, `acceptsRules`, `acceptsPrivacy`. Trois demandes par heure au plus depuis une
 même connexion, et une seule demande en cours par adresse e-mail.
+
+### Bac à sable
+
+Pour essayer tout le circuit sans rien envoyer, un WordPress de test tourne sur la Raspberry Pi :
+
+```bash
+./scripts/bac-a-sable.sh        # Mac / Linux
+.\scripts\bac-a-sable.ps1       # Windows
+```
+
+- `http://<pi>:8504/bac-a-sable/` : Discord simulé (on vote à la place des 6 membres du CA,
+  ou d'une personne hors CA) et les e-mails qui seraient partis. Bouton de remise à zéro.
+- `http://<pi>:8504/wp-admin/` : la vue du bureau. Identifiants dans
+  `~/nyassobi-bac-a-sable/IDENTIFIANTS.txt` sur la Pi.
+- `http://<pi>:8505/` : la copie du site branchée sur ce WordPress, déployée depuis le dépôt
+  du site avec `./scripts/deployer.sh --bac-a-sable`. Elle affiche les vrais contenus, mais
+  ses formulaires (adhésion, contact) partent vers le bac à sable.
+
+Le mu-plugin `bac-a-sable/mu/bac-a-sable.php` intercepte Discord et tous les e-mails : il ne
+doit jamais être installé sur le vrai WordPress.

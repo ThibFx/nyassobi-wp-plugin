@@ -22,10 +22,11 @@ scp -q $archive "${Hote}:/tmp/bac-a-sable.tgz"
 if ($LASTEXITCODE -ne 0) { Write-Host "ECHEC: copie vers $Hote (acces SSH ?)" -ForegroundColor Red; exit 1 }
 Remove-Item $archive
 
-# Le plugin est remplace en entier, pour qu'un fichier supprime ici le soit aussi la-bas.
-$commande = "set -e; mkdir -p ~/$dossier && cd ~/$dossier; " +
+# Le contenu du plugin est remplace en entier, mais pas les dossiers eux-memes:
+# les conteneurs les montent, et un dossier recree leur resterait invisible.
+$commande = "set -e; mkdir -p ~/$dossier/plugin ~/$dossier/mu && cd ~/$dossier; " +
   "rm -rf .arrivee && mkdir .arrivee && tar -xzf /tmp/bac-a-sable.tgz -C .arrivee && rm -f /tmp/bac-a-sable.tgz; " +
-  "rm -rf plugin mu && mkdir plugin; " +
+  "find plugin mu -mindepth 1 -delete; " +
   "mv .arrivee/nyassobi-wp-plugin.php .arrivee/includes plugin/; " +
   "cp -r .arrivee/bac-a-sable/. . && rm -rf .arrivee; " +
   "tr -d '\r' < installer.sh > installer.unix && bash installer.unix"
