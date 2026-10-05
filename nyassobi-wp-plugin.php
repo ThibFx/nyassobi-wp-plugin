@@ -17,5 +17,12 @@ if (! defined('ABSPATH')) {
 }
 
 require __DIR__ . '/includes/class-nyassobi-wp-plugin.php';
+require __DIR__ . '/includes/class-nyassobi-membership.php';
 
 Nyassobi_WP_Plugin::instance();
+Nyassobi_Membership::instance();
+
+// The daily purge of stale membership requests must not outlive the plugin.
+register_deactivation_hook(__FILE__, static function (): void {
+    wp_clear_scheduled_hook('nyassobi_membership_purge');
+});
