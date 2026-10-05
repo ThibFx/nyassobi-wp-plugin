@@ -19,8 +19,105 @@ const BAC_FLASH = 'bac_flash';
 const BAC_ROLE_CA = '424242';
 const BAC_MEMBRES = ['ca-1' => 'Membre du CA 1', 'ca-2' => 'Membre du CA 2', 'ca-3' => 'Membre du CA 3', 'ca-4' => 'Membre du CA 4', 'ca-5' => 'Membre du CA 5', 'ca-6' => 'Membre du CA 6', 'invite' => 'Membre du serveur (hors CA)'];
 
+const BAC_PAIEMENTS = 'bac_paiements';
+const BAC_ROLES = 'bac_roles';
+
 // Sur le bac à sable, on doit pouvoir envoyer autant de demandes qu'on veut.
 add_filter('nyassobi_membership_submissions_per_hour', static fn (): int => 1000);
+
+/** Hôte tapé dans le navigateur, sans port : le bac à sable marche en local comme par Tailscale. */
+function bac_hote(): string
+{
+    $hote = (string) ($_SERVER['HTTP_X_FORWARDED_HOST'] ?? $_SERVER['HTTP_HOST'] ?? 'localhost');
+
+    return (string) preg_replace('/:\d+$/', '', $hote);
+}
+
+// Les e-mails renvoient vers la copie du site du bac à sable.
+add_filter('nyassobi_membership_site_url', static fn (): string => 'http://' . bac_hote() . ':8505');
+
+/** Réponse HTTP simulée. */
+function bac_reponse(int $code, $corps): array
+{
+    return ['headers' => [], 'body' => is_string($corps) ? $corps : wp_json_encode($corps), 'response' => ['code' => $code, 'message' => ''], 'cookies' => [], 'filename' => null];
+}
+
+/* HelloAsso, PayPal et les rôles Discord simulés. */
+add_filter('pre_http_request', static function ($pre, $args, $url) {
+    $url = (string) $url;
+    $methode = strtoupper((string) ($args['method'] ?? 'GET'));
+    $corps = is_string($args['body'] ?? null) ? (json_decode($args['body'], true) ?: []) : [];
+    $paiements = get_option(BAC_PAIEMENTS, []);
+
+    if (preg_match('#^https://api\.helloasso(-sandbox)?\.com/(.*)$#', $url, $m)) {
+        $chemin = $m[2];
+        if ('oauth2/token' === $chemin) {
+            return bac_reponse(200, ['access_token' => 'ha-test', 'refresh_token' => 'ha-refresh', 'expires_in' => 1800]);
+        }
+        if ('POST' === $methode && preg_match('#checkout-intents$#', $chemin)) {
+            $id = (string) wp_rand(100000, 999999);
+            $paiements['ha-' . $id] = ['fournisseur' => 'HelloAsso', 'id' => $id, 'montant' => (int) $corps['totalAmount'], 'objet' => $corps['itemName'], 'retour' => $corps['returnUrl'], 'annulation' => $corps['backUrl'], 'metadata' => $corps['metadata'] ?? [], 'paye' => false];
+            update_option(BAC_PAIEMENTS, $paiements, false);
+            return bac_reponse(200, ['id' => (int) $id, 'redirectUrl' => 'http://' . bac_hote() . ':8504/bac-a-sable/paiement/?ref=ha-' . $id]);
+        }
+        if (preg_match('#checkout-intents/(\d+)$#', $chemin, $i)) {
+            $paiement = $paiements['ha-' . $i[1]] ?? null;
+            return bac_reponse(null === $paiement ? 404 : 200, ['id' => (int) $i[1]] + (! empty($paiement['paye']) ? ['order' => ['id' => (int) $i[1] + 1]] : []));
+        }
+        return bac_reponse(404, []);
+    }
+
+    if (preg_match('#^https://api-m\.(sandbox\.)?paypal\.com/(.*)$#', $url, $m)) {
+        $chemin = $m[2];
+        if ('v1/oauth2/token' === $chemin) {
+            return bac_reponse(200, ['access_token' => 'pp-test', 'expires_in' => 3600]);
+        }
+        if ('POST' === $methode && 'v2/checkout/orders' === $chemin) {
+            $id = 'PP' . strtoupper(wp_generate_password(10, false));
+            $contexte = $corps['payment_source']['paypal']['experience_context'] ?? [];
+            $unite = $corps['purchase_units'][0] ?? [];
+            $paiements['pp-' . $id] = ['fournisseur' => 'PayPal', 'id' => $id, 'montant' => (int) round(((float) ($unite['amount']['value'] ?? 0)) * 100), 'objet' => $unite['description'] ?? '', 'reference' => $unite['reference_id'] ?? '', 'retour' => $contexte['return_url'] ?? '', 'annulation' => $contexte['cancel_url'] ?? '', 'approuve' => false, 'capture' => false];
+            update_option(BAC_PAIEMENTS, $paiements, false);
+            return bac_reponse(200, ['id' => $id, 'status' => 'PAYER_ACTION_REQUIRED', 'links' => [['rel' => 'payer-action', 'href' => 'http://' . bac_hote() . ':8504/bac-a-sable/paiement/?ref=pp-' . $id]]]);
+        }
+        if (preg_match('#^v2/checkout/orders/([A-Z0-9]+)(/capture)?$#', $chemin, $o)) {
+            $cle = 'pp-' . $o[1];
+            $paiement = $paiements[$cle] ?? null;
+            if (null === $paiement) {
+                return bac_reponse(404, []);
+            }
+            $statut = ['status' => $paiement['capture'] ? 'COMPLETED' : 'APPROVED', 'purchase_units' => [['reference_id' => $paiement['reference']]]];
+            if (! empty($o[2])) {
+                if (! $paiement['approuve']) {
+                    return bac_reponse(422, ['name' => 'UNPROCESSABLE_ENTITY']);
+                }
+                if ($paiement['capture']) {
+                    return bac_reponse(422, ['name' => 'ORDER_ALREADY_CAPTURED']);
+                }
+                $paiements[$cle]['capture'] = true;
+                update_option(BAC_PAIEMENTS, $paiements, false);
+                $statut['status'] = 'COMPLETED';
+            }
+            return bac_reponse(200, $statut);
+        }
+        return bac_reponse(404, []);
+    }
+
+    if (preg_match('#^https://discord\.com/api/v10/guilds/[^/]+/members/search\?(.*)$#', $url, $m)) {
+        parse_str($m[1], $q);
+        $pseudo = strtolower((string) ($q['query'] ?? ''));
+        // « absent » dans le pseudo simule quelqu'un qui n'est pas sur le serveur.
+        return bac_reponse(200, false !== strpos($pseudo, 'absent') ? [] : [['user' => ['id' => (string) crc32($pseudo), 'username' => $pseudo]]]);
+    }
+    if ('PUT' === $methode && preg_match('#^https://discord\.com/api/v10/guilds/[^/]+/members/([^/]+)/roles/([^/]+)$#', $url, $m)) {
+        $roles = get_option(BAC_ROLES, []);
+        array_unshift($roles, ['membre' => $m[1], 'date' => current_time('mysql')]);
+        update_option(BAC_ROLES, array_slice($roles, 0, 30), false);
+        return bac_reponse(204, '');
+    }
+
+    return $pre;
+}, 5, 3);
 
 /* Discord simulé : les messages postés ou modifiés par le plugin sont gardés ici. */
 add_filter('pre_http_request', static function ($pre, $args, $url) {
@@ -97,6 +194,91 @@ function bac_voter(string $message_id, string $custom_id, string $membre): void
     }
 }
 
+/**
+ * Fait comme si la demande avait été acceptée N jours plus tôt, puis lance la
+ * tâche quotidienne : de quoi voir la relance et l'expiration sans attendre.
+ */
+function bac_avancer(int $demande, int $jours): void
+{
+    $accepte = (int) get_post_meta($demande, '_nyassobi_accepted_at', true);
+    if ($accepte) {
+        update_post_meta($demande, '_nyassobi_accepted_at', (string) ($accepte - $jours * DAY_IN_SECONDS));
+        do_action(Nyassobi_Membership::PURGE_HOOK);
+        set_transient(BAC_FLASH, sprintf('Demande n°%d : %d jours plus tard, tâche quotidienne lancée.', $demande, $jours), 60);
+    }
+}
+
+/** Page de paiement factice, à la place de HelloAsso ou de PayPal. */
+function bac_page_paiement(): void
+{
+    $ref = sanitize_text_field((string) ($_REQUEST['ref'] ?? ''));
+    $paiements = get_option(BAC_PAIEMENTS, []);
+    $paiement = $paiements[$ref] ?? null;
+    if (null === $paiement) {
+        wp_die('Paiement inconnu.');
+    }
+    $helloasso = 'HelloAsso' === $paiement['fournisseur'];
+
+    if ('POST' === ($_SERVER['REQUEST_METHOD'] ?? '')) {
+        check_admin_referer('bac_paiement');
+        $choix = sanitize_key((string) ($_POST['choix'] ?? ''));
+        if ('annuler' === $choix) {
+            wp_redirect($paiement['annulation']);
+            exit;
+        }
+        if ($helloasso) {
+            $paiements[$ref]['paye'] = true;
+            update_option(BAC_PAIEMENTS, $paiements, false);
+            // Comme HelloAsso : une notification part vers WordPress dès le paiement.
+            $notification = new WP_REST_Request('POST', '/nyassobi/v1/helloasso');
+            $notification->set_body((string) wp_json_encode(['eventType' => 'Payment', 'data' => ['state' => 'Authorized'], 'metadata' => $paiement['metadata']]));
+            rest_do_request($notification);
+            if ('fermer' === $choix) {
+                set_transient(BAC_FLASH, 'Paiement fait puis onglet fermé : seule la notification de HelloAsso a prévenu WordPress.', 60);
+                wp_safe_redirect(home_url('/bac-a-sable/'));
+                exit;
+            }
+            wp_redirect(add_query_arg(['checkoutIntentId' => $paiement['id'], 'code' => 'succeeded', 'orderId' => (int) $paiement['id'] + 1], $paiement['retour']));
+            exit;
+        }
+        $paiements[$ref]['approuve'] = true;
+        update_option(BAC_PAIEMENTS, $paiements, false);
+        wp_redirect(add_query_arg(['token' => $paiement['id'], 'PayerID' => 'BACASABLE'], $paiement['retour']));
+        exit;
+    }
+
+    $couleur = $helloasso ? '#2e2f5e' : '#003087';
+    $accent = $helloasso ? '#4c40cf' : '#ffc439';
+    $nonce = wp_create_nonce('bac_paiement');
+    ?>
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title><?php echo esc_html($paiement['fournisseur']); ?> (simulé)</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; font: 16px/1.5 system-ui, sans-serif; background: #f4f5fa; color: #1d1d1f; }
+  .carte { background: white; border-radius: 18px; padding: 28px; width: min(420px, 92vw); box-shadow: 0 20px 50px -20px rgb(0 0 0 / .3); }
+  .bandeau { color: white; background: <?php echo esc_attr($couleur); ?>; margin: -28px -28px 20px; padding: 16px 28px; border-radius: 18px 18px 0 0; font-weight: 700; }
+  .montant { font-size: 34px; font-weight: 800; margin: 4px 0 16px; }
+  button { width: 100%; border: 0; border-radius: 999px; padding: 13px; font: inherit; font-weight: 700; cursor: pointer; margin-top: 10px; }
+  .payer { background: <?php echo esc_attr($accent); ?>; color: <?php echo $helloasso ? 'white' : '#111'; ?>; }
+  .autre { background: #eceef5; color: #333; }
+  .note { font-size: 13px; color: #777; margin-top: 16px; }
+</style></head><body>
+<form method="post" class="carte">
+  <div class="bandeau"><?php echo esc_html($paiement['fournisseur']); ?> · simulé par le bac à sable</div>
+  <div><?php echo esc_html((string) $paiement['objet']); ?></div>
+  <div class="montant"><?php echo esc_html(number_format_i18n($paiement['montant'] / 100, 2)); ?> €</div>
+  <input type="hidden" name="_wpnonce" value="<?php echo esc_attr($nonce); ?>">
+  <input type="hidden" name="ref" value="<?php echo esc_attr($ref); ?>">
+  <button class="payer" name="choix" value="payer"><?php echo $helloasso ? 'Payer par carte' : 'Payer avec PayPal'; ?></button>
+  <?php if ($helloasso) : ?><button class="autre" name="choix" value="fermer">Payer puis fermer l'onglet (sans revenir au site)</button><?php endif; ?>
+  <button class="autre" name="choix" value="annuler">Annuler et revenir au site</button>
+  <p class="note">Aucun argent ne circule : cette page remplace <?php echo esc_html($paiement['fournisseur']); ?> pour les tests.</p>
+</form>
+</body></html>
+    <?php
+}
+
 function bac_reinitialiser(): void
 {
     foreach (get_posts(['post_type' => 'nyassobi_adhesion', 'post_status' => 'any', 'numberposts' => -1, 'fields' => 'ids']) as $id) {
@@ -104,11 +286,17 @@ function bac_reinitialiser(): void
     }
     update_option(BAC_MESSAGES, [], false);
     update_option(BAC_MAILS, [], false);
+    update_option(BAC_PAIEMENTS, [], false);
+    update_option(BAC_ROLES, [], false);
     set_transient(BAC_FLASH, 'Bac à sable remis à zéro.', 60);
 }
 
 add_action('template_redirect', static function (): void {
     $chemin = trim((string) wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH), '/');
+    if ('bac-a-sable/paiement' === $chemin) {
+        bac_page_paiement();
+        exit;
+    }
     if ('bac-a-sable' !== $chemin) {
         return;
     }
@@ -117,6 +305,8 @@ add_action('template_redirect', static function (): void {
         check_admin_referer('bac_a_sable');
         if (isset($_POST['reinitialiser'])) {
             bac_reinitialiser();
+        } elseif (isset($_POST['avancer'])) {
+            bac_avancer((int) $_POST['demande'], (int) $_POST['avancer']);
         } else {
             $membre = sanitize_key((string) ($_POST['membre'] ?? ''));
             if (isset(BAC_MEMBRES[$membre])) {
@@ -147,6 +337,8 @@ function bac_afficher(): void
 {
     $messages = array_reverse(get_option(BAC_MESSAGES, []), true);
     $mails = get_option(BAC_MAILS, []);
+    $roles = get_option(BAC_ROLES, []);
+    $en_attente = get_posts(['post_type' => 'nyassobi_adhesion', 'post_status' => 'any', 'numberposts' => 20, 'meta_query' => [['key' => '_nyassobi_status', 'value' => 'accepted']]]);
     $flash = get_transient(BAC_FLASH);
     delete_transient(BAC_FLASH);
     $membre = sanitize_key((string) ($_COOKIE['bac_membre'] ?? 'ca-1'));
@@ -249,6 +441,28 @@ function bac_afficher(): void
             <?php endforeach; ?>
           </div>
         </div>
+      <?php endforeach; ?>
+    </div>
+    <h2 style="margin-top:22px">Cotisations en attente</h2>
+    <div class="votant">
+      <?php if (! $en_attente) : ?><p class="vide" style="margin:0">Aucune demande acceptée en attente de paiement.</p><?php endif; ?>
+      <?php foreach ($en_attente as $demande) :
+          $jours = (int) floor((time() - (int) get_post_meta($demande->ID, '_nyassobi_accepted_at', true)) / DAY_IN_SECONDS);
+          ?>
+        <form method="post" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0">
+          <input type="hidden" name="_wpnonce" value="<?php echo esc_attr($nonce); ?>">
+          <input type="hidden" name="demande" value="<?php echo esc_attr((string) $demande->ID); ?>">
+          <span><b>n°<?php echo esc_html((string) $demande->ID); ?></b> (<?php echo esc_html((string) get_post_meta($demande->ID, '_nyassobi_pseudo', true)); ?>), acceptée il y a <?php echo esc_html((string) $jours); ?> j</span>
+          <button type="submit" name="avancer" value="7" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer">+7 jours (relance)</button>
+          <button type="submit" name="avancer" value="30" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer">+30 jours (expiration)</button>
+        </form>
+      <?php endforeach; ?>
+    </div>
+    <h2 style="margin-top:22px">Rôles « Adhérent » donnés sur Discord</h2>
+    <div class="votant">
+      <?php if (! $roles) : ?><p class="vide" style="margin:0">Aucun pour l'instant. Astuce : un pseudo Discord contenant « absent » simule quelqu'un qui n'est pas sur le serveur.</p><?php endif; ?>
+      <?php foreach ($roles as $role) : ?>
+        <p style="margin:4px 0">Membre Discord n°<?php echo esc_html((string) $role['membre']); ?> · <?php echo esc_html((string) $role['date']); ?></p>
       <?php endforeach; ?>
     </div>
     <form method="post" class="raz" onsubmit="return confirm('Effacer toutes les demandes, messages et e-mails de test ?');">

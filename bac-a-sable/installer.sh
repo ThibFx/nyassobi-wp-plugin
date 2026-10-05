@@ -51,8 +51,21 @@ update_option("nyassobi_membership", [
     "discord_channel_id" => "2",
     "discord_board_role_id" => "424242",
     "board_size" => "6",
-    "payment_url" => "https://www.helloasso.com/associations/nyassobi (lien de test)",
     "bureau_email" => "bureau@bac-a-sable.test",
+    "fee_normal" => "20",
+    "fee_reduced" => "15",
+    "helloasso_client_id" => "client-du-bac-a-sable",
+    "helloasso_client_secret" => "secret-du-bac-a-sable",
+    "helloasso_org_slug" => "nyassobi",
+    "helloasso_sandbox" => "1",
+    "paypal_client_id" => "client-du-bac-a-sable",
+    "paypal_client_secret" => "secret-du-bac-a-sable",
+    "paypal_sandbox" => "1",
+    "reminder_days" => "7",
+    "expiry_days" => "30",
+    "discord_guild_id" => "3",
+    "discord_member_role_id" => "5",
+    "discord_invite_url" => "https://discord.gg/exemple-bac-a-sable",
 ]);
 $principal = get_option("nyassobi_wp_plugin", []);
 $principal["contact_email"] = "contact@bac-a-sable.test";

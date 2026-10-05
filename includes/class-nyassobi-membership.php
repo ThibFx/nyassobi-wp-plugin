@@ -28,25 +28,25 @@ final class Nyassobi_Membership
     private const OPTION_NAME = 'nyassobi_membership';
     private const OPTION_GROUP = 'nyassobi_membership_group';
     private const PAGE_SLUG = 'nyassobi-membership';
-    private const CAPABILITY = 'manage_options';
-    private const REST_NAMESPACE = 'nyassobi/v1';
+    public const CAPABILITY = 'manage_options';
+    public const REST_NAMESPACE = 'nyassobi/v1';
     private const DISCORD_API = 'https://discord.com/api/v10';
     private const CUSTOM_ID_PREFIX = 'nyassobi_vote';
     private const DECIDED_HOOK = 'nyassobi_membership_decided';
-    private const PURGE_HOOK = 'nyassobi_membership_purge';
+    public const PURGE_HOOK = 'nyassobi_membership_purge';
     private const PENDING_EXPIRY_DAYS = 90;
     private const SUBMISSIONS_PER_HOUR = 3;
 
-    private const META_PSEUDO = '_nyassobi_pseudo';
-    private const META_FIRST_NAME = '_nyassobi_first_name';
-    private const META_LAST_NAME = '_nyassobi_last_name';
-    private const META_BIRTH_DATE = '_nyassobi_birth_date';
-    private const META_EMAIL = '_nyassobi_email';
-    private const META_EMAIL_HASH = '_nyassobi_email_hash';
-    private const META_REDUCED_RATE = '_nyassobi_reduced_rate';
-    private const META_STATUS = '_nyassobi_status';
-    private const META_VOTES = '_nyassobi_votes';
-    private const META_DISCORD_MESSAGE = '_nyassobi_discord_message';
+    public const META_PSEUDO = '_nyassobi_pseudo';
+    public const META_FIRST_NAME = '_nyassobi_first_name';
+    public const META_LAST_NAME = '_nyassobi_last_name';
+    public const META_BIRTH_DATE = '_nyassobi_birth_date';
+    public const META_EMAIL = '_nyassobi_email';
+    public const META_EMAIL_HASH = '_nyassobi_email_hash';
+    public const META_REDUCED_RATE = '_nyassobi_reduced_rate';
+    public const META_STATUS = '_nyassobi_status';
+    public const META_VOTES = '_nyassobi_votes';
+    public const META_DISCORD_MESSAGE = '_nyassobi_discord_message';
     private const META_PARENTAL_FILE = '_nyassobi_parental_file';
     private const META_PARENTAL_MIME = '_nyassobi_parental_mime';
 
@@ -61,9 +61,16 @@ final class Nyassobi_Membership
         'image/heif' => 'heif',
     ];
 
-    private const STATUS_PENDING = 'pending';
-    private const STATUS_ACCEPTED = 'accepted';
-    private const STATUS_REFUSED = 'refused';
+    public const STATUS_PENDING = 'pending';
+    public const STATUS_ACCEPTED = 'accepted';
+    public const STATUS_REFUSED = 'refused';
+    public const STATUS_PAID = 'paid';
+    public const STATUS_EXPIRED = 'expired';
+    /** Accepted, but the fee was never paid in time. */
+    public const STATUS_LAPSED = 'lapsed';
+    public const META_DISCORD_USERNAME = '_nyassobi_discord_username';
+    /** Line added under the Discord message once paid (role given, or to give by hand). */
+    public const META_DISCORD_NOTE = '_nyassobi_discord_note';
 
     private const VOTE_LABELS = [
         'pour' => 'Pour',
@@ -168,50 +175,165 @@ final class Nyassobi_Membership
      * ------------------------------------------------------------------ */
 
     /**
-     * @return array<string,array{label:string,description:string,type:string}>
+     * Settings sections, in page order.
+     *
+     * @return array<string,string>
      */
-    private function get_fields_definition(): array
+    private function get_sections(): array
+    {
+        return [
+            'discord' => __('Vote du CA sur Discord', 'nyassobi-wp-plugin'),
+            'paiement' => __('Paiement de la cotisation', 'nyassobi-wp-plugin'),
+            'role' => __('Rôle Discord des adhérents', 'nyassobi-wp-plugin'),
+        ];
+    }
+
+    /**
+     * Types: `id` (Discord identifiers and keys, digits / hex only), `text`,
+     * `secret` (never printed back), `number`, `url`, `email`, `checkbox`.
+     *
+     * @return array<string,array{label:string,description:string,type:string,section:string}>
+     */
+    public function get_fields_definition(): array
     {
         return [
             'discord_application_id' => [
+                'section' => 'discord',
                 'label' => __('ID de l\'application Discord', 'nyassobi-wp-plugin'),
                 'description' => __('Portail développeur Discord > General Information > Application ID.', 'nyassobi-wp-plugin'),
-                'type' => 'text',
+                'type' => 'id',
             ],
             'discord_public_key' => [
+                'section' => 'discord',
                 'label' => __('Clé publique Discord', 'nyassobi-wp-plugin'),
                 'description' => __('General Information > Public Key. Sert à vérifier que les clics viennent bien de Discord.', 'nyassobi-wp-plugin'),
-                'type' => 'text',
+                'type' => 'id',
             ],
             'discord_bot_token' => [
+                'section' => 'discord',
                 'label' => __('Jeton du bot Discord', 'nyassobi-wp-plugin'),
                 'description' => __('Bot > Reset Token. Laisser vide pour conserver le jeton déjà enregistré.', 'nyassobi-wp-plugin'),
                 'type' => 'secret',
             ],
             'discord_channel_id' => [
+                'section' => 'discord',
                 'label' => __('ID du salon du CA', 'nyassobi-wp-plugin'),
                 'description' => __('Salon privé où arrivent les demandes (clic droit sur le salon > Copier l\'identifiant).', 'nyassobi-wp-plugin'),
-                'type' => 'text',
+                'type' => 'id',
             ],
             'discord_board_role_id' => [
+                'section' => 'discord',
                 'label' => __('ID du rôle CA', 'nyassobi-wp-plugin'),
                 'description' => __('Seules les personnes ayant ce rôle peuvent voter.', 'nyassobi-wp-plugin'),
-                'type' => 'text',
+                'type' => 'id',
             ],
             'board_size' => [
+                'section' => 'discord',
                 'label' => __('Nombre de membres du CA', 'nyassobi-wp-plugin'),
                 'description' => __('Une demande est acceptée à la moitié + 1 de ce nombre (4 voix pour un CA de 6).', 'nyassobi-wp-plugin'),
                 'type' => 'number',
             ],
-            'payment_url' => [
-                'label' => __('Lien de paiement de la cotisation', 'nyassobi-wp-plugin'),
-                'description' => __('Envoyé par e-mail une fois la demande acceptée (formulaire HelloAsso, par exemple).', 'nyassobi-wp-plugin'),
+            'bureau_email' => [
+                'section' => 'discord',
+                'label' => __('E-mail du bureau', 'nyassobi-wp-plugin'),
+                'description' => __('Prévenu quand une cotisation est payée, pour inscrire la personne au registre. Aucune donnée personnelle dans ce message.', 'nyassobi-wp-plugin'),
+                'type' => 'email',
+            ],
+            'site_url' => [
+                'section' => 'paiement',
+                'label' => __('Adresse du site public', 'nyassobi-wp-plugin'),
+                'description' => __('Par exemple https://nyassobi.fr : les e-mails y renvoient vers la page de paiement de la cotisation.', 'nyassobi-wp-plugin'),
                 'type' => 'url',
             ],
-            'bureau_email' => [
-                'label' => __('E-mail du bureau', 'nyassobi-wp-plugin'),
-                'description' => __('Prévenu quand une demande est acceptée, pour la finaliser. Aucune donnée personnelle dans ce message.', 'nyassobi-wp-plugin'),
-                'type' => 'email',
+            'fee_normal' => [
+                'section' => 'paiement',
+                'label' => __('Cotisation, tarif normal (€)', 'nyassobi-wp-plugin'),
+                'description' => __('20 € par défaut. Affichée sur le formulaire du site.', 'nyassobi-wp-plugin'),
+                'type' => 'number',
+            ],
+            'fee_reduced' => [
+                'section' => 'paiement',
+                'label' => __('Cotisation, tarif réduit (€)', 'nyassobi-wp-plugin'),
+                'description' => __('15 € par défaut : mineurs, étudiants, demandeurs d\'emploi, aides sociales.', 'nyassobi-wp-plugin'),
+                'type' => 'number',
+            ],
+            'helloasso_client_id' => [
+                'section' => 'paiement',
+                'label' => __('HelloAsso : client ID', 'nyassobi-wp-plugin'),
+                'description' => __('Back-office HelloAsso > Mon compte > Intégrations et API.', 'nyassobi-wp-plugin'),
+                'type' => 'text',
+            ],
+            'helloasso_client_secret' => [
+                'section' => 'paiement',
+                'label' => __('HelloAsso : client secret', 'nyassobi-wp-plugin'),
+                'description' => __('Laisser vide pour conserver la clé déjà enregistrée.', 'nyassobi-wp-plugin'),
+                'type' => 'secret',
+            ],
+            'helloasso_org_slug' => [
+                'section' => 'paiement',
+                'label' => __('HelloAsso : nom de l\'association dans l\'adresse', 'nyassobi-wp-plugin'),
+                'description' => __('La partie après /associations/ dans l\'adresse de la page HelloAsso (« nyassobi »).', 'nyassobi-wp-plugin'),
+                'type' => 'text',
+            ],
+            'helloasso_sandbox' => [
+                'section' => 'paiement',
+                'label' => __('HelloAsso : environnement de test', 'nyassobi-wp-plugin'),
+                'description' => __('Utilise helloasso-sandbox.com et ses cartes bancaires fictives.', 'nyassobi-wp-plugin'),
+                'type' => 'checkbox',
+            ],
+            'payment_url' => [
+                'section' => 'paiement',
+                'label' => __('Lien de paiement de secours', 'nyassobi-wp-plugin'),
+                'description' => __('Utilisé tant que l\'API HelloAsso n\'est pas renseignée : le bureau marque alors le paiement à la main.', 'nyassobi-wp-plugin'),
+                'type' => 'url',
+            ],
+            'paypal_client_id' => [
+                'section' => 'paiement',
+                'label' => __('PayPal : client ID', 'nyassobi-wp-plugin'),
+                'description' => __('Compte PayPal Business > Développeurs > Applications. Vide = PayPal non proposé.', 'nyassobi-wp-plugin'),
+                'type' => 'text',
+            ],
+            'paypal_client_secret' => [
+                'section' => 'paiement',
+                'label' => __('PayPal : secret', 'nyassobi-wp-plugin'),
+                'description' => __('Laisser vide pour conserver la clé déjà enregistrée.', 'nyassobi-wp-plugin'),
+                'type' => 'secret',
+            ],
+            'paypal_sandbox' => [
+                'section' => 'paiement',
+                'label' => __('PayPal : environnement de test', 'nyassobi-wp-plugin'),
+                'description' => __('Utilise le bac à sable de PayPal (comptes fictifs).', 'nyassobi-wp-plugin'),
+                'type' => 'checkbox',
+            ],
+            'reminder_days' => [
+                'section' => 'paiement',
+                'label' => __('Relance après (jours)', 'nyassobi-wp-plugin'),
+                'description' => __('Un e-mail de rappel part si la cotisation n\'est pas réglée. 7 par défaut.', 'nyassobi-wp-plugin'),
+                'type' => 'number',
+            ],
+            'expiry_days' => [
+                'section' => 'paiement',
+                'label' => __('Expiration après (jours)', 'nyassobi-wp-plugin'),
+                'description' => __('Sans paiement, la demande expire et ses données sont effacées. 30 par défaut.', 'nyassobi-wp-plugin'),
+                'type' => 'number',
+            ],
+            'discord_guild_id' => [
+                'section' => 'role',
+                'label' => __('ID du serveur Discord', 'nyassobi-wp-plugin'),
+                'description' => __('Clic droit sur le serveur > Copier l\'identifiant. Vide = pas de rôle automatique.', 'nyassobi-wp-plugin'),
+                'type' => 'id',
+            ],
+            'discord_member_role_id' => [
+                'section' => 'role',
+                'label' => __('ID du rôle « Adhérent »', 'nyassobi-wp-plugin'),
+                'description' => __('Donné automatiquement au paiement. Le rôle du bot doit être placé au-dessus dans la liste des rôles.', 'nyassobi-wp-plugin'),
+                'type' => 'id',
+            ],
+            'discord_invite_url' => [
+                'section' => 'role',
+                'label' => __('Invitation au serveur Discord', 'nyassobi-wp-plugin'),
+                'description' => __('Envoyée aux nouveaux membres qui ne sont pas encore sur le serveur.', 'nyassobi-wp-plugin'),
+                'type' => 'url',
             ],
         ];
     }
@@ -223,7 +345,12 @@ final class Nyassobi_Membership
     {
         $stored = get_option(self::OPTION_NAME, []);
         $settings = is_array($stored) ? array_map('strval', $stored) : [];
-        $settings['board_size'] = (string) max(1, (int) ($settings['board_size'] ?? 6));
+        $defaults = ['board_size' => 6, 'fee_normal' => 20, 'fee_reduced' => 15, 'reminder_days' => 7, 'expiry_days' => 30];
+        foreach ($defaults as $key => $default) {
+            $settings[$key] = (string) (max(0, (int) ($settings[$key] ?? 0)) ?: $default);
+        }
+        // The test environment points the links to its own copy of the site.
+        $settings['site_url'] = (string) apply_filters('nyassobi_membership_site_url', untrailingslashit($settings['site_url'] ?? '') ?: home_url());
 
         return $settings;
     }
@@ -253,19 +380,32 @@ final class Nyassobi_Membership
             ]
         );
 
-        add_settings_section(
-            'nyassobi_membership_section',
-            __('Vote du CA sur Discord', 'nyassobi-wp-plugin'),
-            function (): void {
-                printf(
-                    '<p>%s</p><p>%s <code>%s</code></p>',
-                    esc_html__('Les demandes d\'adhésion du site sont soumises au vote du conseil d\'administration dans un salon Discord privé. Le CA ne voit que le pseudo.', 'nyassobi-wp-plugin'),
-                    esc_html__('Dans le portail développeur Discord, renseigner comme « Interactions Endpoint URL » :', 'nyassobi-wp-plugin'),
-                    esc_html(rest_url(self::REST_NAMESPACE . '/discord'))
-                );
-            },
-            self::PAGE_SLUG
-        );
+        $intros = [
+            'discord' => sprintf(
+                '<p>%s</p><p>%s <code>%s</code></p>',
+                esc_html__('Les demandes d\'adhésion du site sont soumises au vote du conseil d\'administration dans un salon Discord privé. Le CA ne voit que le pseudo.', 'nyassobi-wp-plugin'),
+                esc_html__('Dans le portail développeur Discord, renseigner comme « Interactions Endpoint URL » :', 'nyassobi-wp-plugin'),
+                esc_html(rest_url(self::REST_NAMESPACE . '/discord'))
+            ),
+            'paiement' => sprintf(
+                '<p>%s</p><p>%s <code>%s</code></p>',
+                esc_html__('Une fois la demande acceptée, la personne reçoit un lien vers une page de paiement : carte bancaire par HelloAsso, et PayPal si ses clés sont renseignées. Le paiement est détecté tout seul.', 'nyassobi-wp-plugin'),
+                esc_html__('Dans HelloAsso (Intégrations et API > Notifications), indiquer comme adresse de notification :', 'nyassobi-wp-plugin'),
+                esc_html(rest_url(self::REST_NAMESPACE . '/helloasso'))
+            ),
+            'role' => '<p>' . esc_html__('Facultatif : le formulaire demande alors le pseudo Discord, et le rôle est donné dès le paiement. Le bot doit avoir la permission « Gérer les rôles ».', 'nyassobi-wp-plugin') . '</p>',
+        ];
+
+        foreach ($this->get_sections() as $section => $title) {
+            add_settings_section(
+                'nyassobi_membership_' . $section,
+                $title,
+                static function () use ($intros, $section): void {
+                    echo $intros[$section]; // phpcs:ignore WordPress.Security.EscapeOutput -- escaped above.
+                },
+                self::PAGE_SLUG
+            );
+        }
 
         foreach ($this->get_fields_definition() as $key => $field) {
             add_settings_field(
@@ -273,7 +413,7 @@ final class Nyassobi_Membership
                 esc_html($field['label']),
                 [$this, 'render_field'],
                 self::PAGE_SLUG,
-                'nyassobi_membership_section',
+                'nyassobi_membership_' . $field['section'],
                 ['key' => $key, 'type' => $field['type'], 'description' => $field['description']]
             );
         }
@@ -320,23 +460,26 @@ final class Nyassobi_Membership
      */
     public function render_field(array $args): void
     {
-        $settings = self::get_settings();
+        $stored = get_option(self::OPTION_NAME, []);
         $key = $args['key'];
-        $value = $settings[$key] ?? '';
+        $value = is_array($stored) ? (string) ($stored[$key] ?? '') : '';
         $name = sprintf('%s[%s]', self::OPTION_NAME, $key);
 
         switch ($args['type']) {
             case 'secret':
-                // The token is never printed back into the page.
+                // Secrets are never printed back into the page.
                 printf(
                     '<input type="password" name="%1$s" id="%2$s" value="" class="regular-text" autocomplete="off" placeholder="%3$s" />',
                     esc_attr($name),
                     esc_attr($key),
-                    esc_attr('' !== $value ? __('Jeton enregistré', 'nyassobi-wp-plugin') : '')
+                    esc_attr('' !== $value ? __('Clé enregistrée', 'nyassobi-wp-plugin') : '')
                 );
                 break;
             case 'number':
-                printf('<input type="number" min="1" max="50" name="%1$s" id="%2$s" value="%3$s" class="small-text" />', esc_attr($name), esc_attr($key), esc_attr($value));
+                printf('<input type="number" min="0" max="500" name="%1$s" id="%2$s" value="%3$s" class="small-text" />', esc_attr($name), esc_attr($key), esc_attr($value));
+                break;
+            case 'checkbox':
+                printf('<label><input type="checkbox" name="%1$s" id="%2$s" value="1" %3$s /> %4$s</label>', esc_attr($name), esc_attr($key), checked('1', $value, false), esc_html__('Activé', 'nyassobi-wp-plugin'));
                 break;
             case 'url':
             case 'email':
@@ -358,7 +501,8 @@ final class Nyassobi_Membership
      */
     public function sanitize_settings(?array $input): array
     {
-        $previous = self::get_settings();
+        $previous = get_option(self::OPTION_NAME, []);
+        $previous = is_array($previous) ? $previous : [];
         $sanitized = [];
 
         foreach ($this->get_fields_definition() as $key => $field) {
@@ -366,10 +510,13 @@ final class Nyassobi_Membership
 
             switch ($field['type']) {
                 case 'secret':
-                    $sanitized[$key] = '' !== $raw ? sanitize_text_field($raw) : ($previous[$key] ?? '');
+                    $sanitized[$key] = '' !== $raw ? sanitize_text_field($raw) : (string) ($previous[$key] ?? '');
                     break;
                 case 'number':
-                    $sanitized[$key] = (string) max(1, min(50, (int) $raw));
+                    $sanitized[$key] = '' === $raw ? '' : (string) max(0, min(500, (int) $raw));
+                    break;
+                case 'checkbox':
+                    $sanitized[$key] = '1' === $raw ? '1' : '';
                     break;
                 case 'url':
                     $sanitized[$key] = esc_url_raw($raw);
@@ -377,8 +524,10 @@ final class Nyassobi_Membership
                 case 'email':
                     $sanitized[$key] = sanitize_email($raw);
                     break;
+                case 'text':
+                    $sanitized[$key] = sanitize_text_field($raw);
+                    break;
                 default:
-                    // Discord identifiers and keys are digits / hex only.
                     $sanitized[$key] = preg_replace('/[^0-9a-fA-F]/', '', $raw) ?? '';
             }
         }
@@ -437,6 +586,10 @@ final class Nyassobi_Membership
                     'reducedRate' => ['type' => ['non_null' => 'Boolean']],
                     'acceptsRules' => ['type' => ['non_null' => 'Boolean']],
                     'acceptsPrivacy' => ['type' => ['non_null' => 'Boolean']],
+                    'discordUsername' => [
+                        'type' => 'String',
+                        'description' => __('Pseudo Discord, pour recevoir le rôle Adhérent au paiement.', 'nyassobi-wp-plugin'),
+                    ],
                     'parentalAuthorization' => [
                         'type' => 'NyassobiUploadInput',
                         'description' => __('Autorisation parentale signée (PDF ou photo), obligatoire pour les mineurs.', 'nyassobi-wp-plugin'),
@@ -474,6 +627,8 @@ final class Nyassobi_Membership
         $birth_date = sanitize_text_field((string) ($input['birthDate'] ?? ''));
         $email = sanitize_email((string) ($input['email'] ?? ''));
         $reduced_rate = (bool) ($input['reducedRate'] ?? false);
+        // Discord usernames: 2 to 32 lowercase letters, digits, dots and underscores.
+        $discord_username = strtolower(ltrim(trim((string) ($input['discordUsername'] ?? '')), '@'));
 
         if ('' === $pseudo || '' === $first_name || '' === $last_name) {
             throw new $error(__('Merci de remplir ton pseudo, ton prénom et ton nom.', 'nyassobi-wp-plugin'));
@@ -483,6 +638,9 @@ final class Nyassobi_Membership
         }
         if (! is_email($email)) {
             throw new $error(__('Cette adresse e-mail ne semble pas valide.', 'nyassobi-wp-plugin'));
+        }
+        if ('' !== $discord_username && ! preg_match('/^[a-z0-9_.]{2,32}$/', $discord_username)) {
+            throw new $error(__('Ce pseudo Discord ne semble pas valide (lettres, chiffres, points et tirets bas).', 'nyassobi-wp-plugin'));
         }
         $age = self::age_from_birth_date($birth_date);
         if (null === $age || $age < 0 || $age > 120) {
@@ -540,6 +698,9 @@ final class Nyassobi_Membership
         update_post_meta($post_id, self::META_REDUCED_RATE, ($reduced_rate || $age < 18) ? '1' : '0');
         update_post_meta($post_id, self::META_STATUS, self::STATUS_PENDING);
         update_post_meta($post_id, self::META_VOTES, []);
+        if ('' !== $discord_username) {
+            update_post_meta($post_id, self::META_DISCORD_USERNAME, $discord_username);
+        }
 
         if (is_array($parental) && ! $this->store_parental_file($post_id, $parental)) {
             wp_delete_post($post_id, true);
@@ -806,12 +967,18 @@ final class Nyassobi_Membership
                 'footer' => ['text' => 'Réservé au CA · un vote peut être changé tant que la décision n\'est pas prise'],
             ];
         } else {
-            $accepted = self::STATUS_ACCEPTED === $status;
-            $outcome = $accepted ? 'Acceptée' : (self::STATUS_REFUSED === $status ? 'Refusée' : 'Expirée sans décision');
+            $outcomes = [
+                self::STATUS_ACCEPTED => 'Acceptée · cotisation en attente',
+                self::STATUS_PAID => 'Acceptée · cotisation reçue',
+                self::STATUS_REFUSED => 'Refusée',
+                self::STATUS_LAPSED => 'Acceptée · cotisation non réglée, demande expirée',
+                self::STATUS_EXPIRED => 'Expirée sans décision',
+            ];
+            $note = (string) get_post_meta($post_id, self::META_DISCORD_NOTE, true);
             $embed = [
-                'title' => sprintf('Demande n°%d · %s', $post_id, $outcome),
-                'description' => $count_line,
-                'color' => $accepted ? 0x0F9D93 : 0x87685C,
+                'title' => sprintf('Demande n°%d · %s', $post_id, $outcomes[$status] ?? $status),
+                'description' => $count_line . ('' !== $note ? "\n" . $note : ''),
+                'color' => self::STATUS_PAID === $status ? 0x248046 : (self::STATUS_ACCEPTED === $status ? 0x0F9D93 : 0x87685C),
             ];
         }
 
@@ -843,7 +1010,7 @@ final class Nyassobi_Membership
      *
      * @return array<string,mixed>|null Decoded response, or null on failure.
      */
-    private function discord_request(string $method, string $path, array $body = []): ?array
+    public function discord_request(string $method, string $path, array $body = []): ?array
     {
         $settings = self::get_settings();
         $response = wp_remote_request(
@@ -883,7 +1050,7 @@ final class Nyassobi_Membership
     }
 
     /** Refreshes the Discord message after a decision taken outside Discord. */
-    private function update_discord_message(int $post_id): void
+    public function update_discord_message(int $post_id): void
     {
         $message_id = (string) get_post_meta($post_id, self::META_DISCORD_MESSAGE, true);
         if ('' === $message_id) {
@@ -1014,7 +1181,7 @@ final class Nyassobi_Membership
         return new \WP_REST_Response(['type' => 4, 'data' => ['content' => $message, 'flags' => 64]], 200);
     }
 
-    private function acquire_lock(int $post_id): bool
+    public function acquire_lock(int $post_id): bool
     {
         $key = 'nyassobi_vote_lock_' . $post_id;
         for ($attempt = 0; $attempt < 10; ++$attempt) {
@@ -1033,7 +1200,7 @@ final class Nyassobi_Membership
         return false;
     }
 
-    private function release_lock(int $post_id): void
+    public function release_lock(int $post_id): void
     {
         delete_option('nyassobi_vote_lock_' . $post_id);
     }
@@ -1050,38 +1217,9 @@ final class Nyassobi_Membership
         $settings = self::get_settings();
 
         if (self::STATUS_ACCEPTED === $status) {
-            $age = self::age_from_birth_date((string) get_post_meta($post_id, self::META_BIRTH_DATE, true));
-            $reduced = '1' === get_post_meta($post_id, self::META_REDUCED_RATE, true);
-            $lines = [
-                sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $first_name),
-                '',
-                __('Bonne nouvelle : le conseil d\'administration a accepté ta demande d\'adhésion à Nyassobi !', 'nyassobi-wp-plugin'),
-                '',
-                sprintf(
-                    __('Pour la finaliser, il reste à régler ta cotisation annuelle (%s) :', 'nyassobi-wp-plugin'),
-                    $reduced ? __('tarif réduit, 15 €', 'nyassobi-wp-plugin') : __('20 €', 'nyassobi-wp-plugin')
-                ),
-                $settings['payment_url'] ?? '',
-            ];
-            if (null !== $age && $age < 18) {
-                $lines[] = '';
-                $lines[] = __('Nous avons bien ton autorisation parentale : le bureau la vérifie au moment de finaliser ton adhésion.', 'nyassobi-wp-plugin');
-            }
-            array_push($lines, '', __('Bienvenue dans la bande,', 'nyassobi-wp-plugin'), __('L\'équipe Nyassobi', 'nyassobi-wp-plugin'));
-            $this->send_mail($email, __('Nyassobi : ta demande d\'adhésion est acceptée', 'nyassobi-wp-plugin'), $lines);
-
-            if (is_email($settings['bureau_email'] ?? '')) {
-                $this->send_mail(
-                    $settings['bureau_email'],
-                    sprintf(__('Nyassobi : demande n°%d acceptée', 'nyassobi-wp-plugin'), $post_id),
-                    [
-                        sprintf(__('La demande d\'adhésion n°%d a été acceptée par le CA.', 'nyassobi-wp-plugin'), $post_id),
-                        __('Une fois la cotisation reçue et la personne ajoutée au registre, la finaliser (et effacer ses données en ligne) ici :', 'nyassobi-wp-plugin'),
-                        admin_url('post.php?post=' . $post_id . '&action=edit'),
-                    ],
-                    false
-                );
-            }
+            // The acceptance email carries the personal payment link: it is
+            // written by Nyassobi_Membership_Payment.
+            do_action('nyassobi_membership_accepted', $post_id);
         } elseif (self::STATUS_REFUSED === $status) {
             $this->send_mail(
                 $email,
@@ -1104,7 +1242,7 @@ final class Nyassobi_Membership
     /**
      * @param string[] $lines
      */
-    private function send_mail(string $to, string $subject, array $lines, bool $reply_to_contact = true): void
+    public function send_mail(string $to, string $subject, array $lines, bool $reply_to_contact = true): void
     {
         if (! is_email($to)) {
             return;
@@ -1183,13 +1321,15 @@ final class Nyassobi_Membership
         }
     }
 
-    private function status_label(string $status): string
+    public function status_label(string $status): string
     {
         switch ($status) {
             case self::STATUS_PENDING:
                 return __('Vote en cours', 'nyassobi-wp-plugin');
             case self::STATUS_ACCEPTED:
-                return __('Acceptée, à finaliser', 'nyassobi-wp-plugin');
+                return __('Acceptée, cotisation en attente', 'nyassobi-wp-plugin');
+            case self::STATUS_PAID:
+                return __('Cotisation payée, à inscrire au registre', 'nyassobi-wp-plugin');
             case self::STATUS_REFUSED:
                 return __('Refusée', 'nyassobi-wp-plugin');
             default:
@@ -1224,6 +1364,7 @@ final class Nyassobi_Membership
         foreach ($rows as $label => $value) {
             printf('<tr><th scope="row">%s</th><td>%s</td></tr>', esc_html($label), esc_html((string) $value));
         }
+        do_action('nyassobi_membership_metabox_rows', $id);
         if (null !== $age && $age < 18) {
             $file_url = wp_nonce_url(admin_url('admin-post.php?action=nyassobi_membership_file&post=' . $id), 'nyassobi_membership_file_' . $id);
             printf(
@@ -1247,6 +1388,14 @@ final class Nyassobi_Membership
             printf('<a class="button" href="%s">%s</a> ', esc_url($action_url('refuse')), esc_html__('Refuser (décision du CA)', 'nyassobi-wp-plugin'));
         }
         if (self::STATUS_ACCEPTED === $status) {
+            printf(
+                '<a class="button" href="%s" onclick="return confirm(\'%s\');">%s</a>',
+                esc_url($action_url('paid')),
+                esc_js(__('La cotisation a bien été reçue par un autre moyen (espèces, virement...) ?', 'nyassobi-wp-plugin')),
+                esc_html__('Marquer la cotisation comme payée', 'nyassobi-wp-plugin')
+            );
+        }
+        if (self::STATUS_PAID === $status) {
             printf(
                 '<a class="button button-primary" href="%s" onclick="return confirm(\'%s\');">%s</a>',
                 esc_url($action_url('finalize')),
@@ -1276,7 +1425,10 @@ final class Nyassobi_Membership
             update_post_meta($post_id, self::META_STATUS, 'accept' === $action ? self::STATUS_ACCEPTED : self::STATUS_REFUSED);
             $this->update_discord_message($post_id);
             $this->notify_decision($post_id);
-        } elseif ('finalize' === $action && self::STATUS_ACCEPTED === $status) {
+        } elseif ('paid' === $action && self::STATUS_ACCEPTED === $status) {
+            // Paid another way (cash at a convention, transfer...).
+            do_action('nyassobi_membership_mark_paid', $post_id, 'manuel');
+        } elseif ('finalize' === $action && self::STATUS_PAID === $status) {
             wp_delete_post($post_id, true);
         }
 
