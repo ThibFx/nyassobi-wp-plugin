@@ -146,7 +146,13 @@ add_filter('pre_http_request', static function ($pre, $args, $url) {
 /* Messagerie simulée : les e-mails sont gardés au lieu de partir. */
 add_filter('pre_wp_mail', static function ($null, $atts) {
     $mails = get_option(BAC_MAILS, []);
-    array_unshift($mails, ['to' => is_array($atts['to']) ? implode(', ', $atts['to']) : (string) $atts['to'], 'subject' => (string) $atts['subject'], 'message' => (string) $atts['message'], 'date' => current_time('mysql')]);
+    $de = 'WordPress <wordpress@' . bac_hote() . '>';
+    foreach ((array) ($atts['headers'] ?? []) as $entete) {
+        if (0 === stripos((string) $entete, 'From:')) {
+            $de = trim(substr((string) $entete, 5));
+        }
+    }
+    array_unshift($mails, ['de' => $de, 'to' => is_array($atts['to']) ? implode(', ', $atts['to']) : (string) $atts['to'], 'subject' => (string) $atts['subject'], 'message' => (string) $atts['message'], 'date' => current_time('mysql')]);
     update_option(BAC_MAILS, array_slice($mails, 0, 60), false);
 
     return true;
@@ -477,7 +483,7 @@ function bac_afficher(): void
       <?php if (! $mails) : ?><p class="vide">Aucun e-mail pour l'instant.</p><?php endif; ?>
       <?php foreach ($mails as $mail) : ?>
         <article class="mail">
-          <div class="entete">À <?php echo esc_html($mail['to']); ?> · <?php echo esc_html($mail['date']); ?></div>
+          <div class="entete">De <?php echo esc_html($mail['de'] ?? ''); ?> · à <?php echo esc_html($mail['to']); ?> · <?php echo esc_html($mail['date']); ?></div>
           <b><?php echo esc_html($mail['subject']); ?></b>
           <pre><?php echo esc_html($mail['message']); ?></pre>
         </article>

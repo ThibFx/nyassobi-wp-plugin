@@ -66,6 +66,8 @@ update_option("nyassobi_membership", [
     "discord_guild_id" => "3",
     "discord_member_role_id" => "5",
     "discord_invite_url" => "https://discord.gg/exemple-bac-a-sable",
+    "sender_email" => "adhesion@nyassobi.fr",
+    "sender_name" => "Nyassobi",
 ]);
 $principal = get_option("nyassobi_wp_plugin", []);
 $principal["contact_email"] = "contact@bac-a-sable.test";

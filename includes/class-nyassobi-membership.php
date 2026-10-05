@@ -185,6 +185,7 @@ final class Nyassobi_Membership
             'discord' => __('Vote du CA sur Discord', 'nyassobi-wp-plugin'),
             'paiement' => __('Paiement de la cotisation', 'nyassobi-wp-plugin'),
             'role' => __('Rôle Discord des adhérents', 'nyassobi-wp-plugin'),
+            'emails' => __('Expéditeur des e-mails', 'nyassobi-wp-plugin'),
         ];
     }
 
@@ -329,6 +330,18 @@ final class Nyassobi_Membership
                 'description' => __('Donné automatiquement au paiement. Le rôle du bot doit être placé au-dessus dans la liste des rôles.', 'nyassobi-wp-plugin'),
                 'type' => 'id',
             ],
+            'sender_email' => [
+                'section' => 'emails',
+                'label' => __('Adresse d\'expédition', 'nyassobi-wp-plugin'),
+                'description' => __('Une adresse en @nyassobi.fr (par exemple adhesion@nyassobi.fr). Sans elle, WordPress écrit au nom de « WordPress », ce qui fait souvent atterrir les e-mails en spam.', 'nyassobi-wp-plugin'),
+                'type' => 'email',
+            ],
+            'sender_name' => [
+                'section' => 'emails',
+                'label' => __('Nom de l\'expéditeur', 'nyassobi-wp-plugin'),
+                'description' => __('« Nyassobi » par défaut.', 'nyassobi-wp-plugin'),
+                'type' => 'text',
+            ],
             'discord_invite_url' => [
                 'section' => 'role',
                 'label' => __('Invitation au serveur Discord', 'nyassobi-wp-plugin'),
@@ -393,6 +406,7 @@ final class Nyassobi_Membership
                 esc_html__('Dans HelloAsso (Intégrations et API > Notifications), indiquer comme adresse de notification :', 'nyassobi-wp-plugin'),
                 esc_html(rest_url(self::REST_NAMESPACE . '/helloasso'))
             ),
+            'emails' => '<p>' . esc_html__('Les réponses aux e-mails arrivent à l\'adresse de contact des réglages Nyassobi.', 'nyassobi-wp-plugin') . '</p>',
             'role' => '<p>' . esc_html__('Facultatif : le formulaire demande alors le pseudo Discord, et le rôle est donné dès le paiement. Le bot doit avoir la permission « Gérer les rôles ».', 'nyassobi-wp-plugin') . '</p>',
         ];
 
@@ -720,7 +734,7 @@ final class Nyassobi_Membership
             $email,
             __('Nyassobi : demande d\'adhésion bien reçue', 'nyassobi-wp-plugin'),
             [
-                sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $first_name),
+                sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $pseudo),
                 '',
                 __('Nous avons bien reçu ta demande d\'adhésion à Nyassobi, merci !', 'nyassobi-wp-plugin'),
                 __('Le conseil d\'administration va l\'étudier. Tu recevras un e-mail dès qu\'il aura voté, avec la marche à suivre pour régler ta cotisation.', 'nyassobi-wp-plugin'),
@@ -1219,7 +1233,8 @@ final class Nyassobi_Membership
             return;
         }
         $email = (string) get_post_meta($post_id, self::META_EMAIL, true);
-        $first_name = (string) get_post_meta($post_id, self::META_FIRST_NAME, true);
+        // Les e-mails s'adressent à la personne par son pseudo, comme dans la communauté.
+        $pseudo = (string) get_post_meta($post_id, self::META_PSEUDO, true);
         $settings = self::get_settings();
 
         if (self::STATUS_ACCEPTED === $status) {
@@ -1231,7 +1246,7 @@ final class Nyassobi_Membership
                 $email,
                 __('Nyassobi : réponse à ta demande d\'adhésion', 'nyassobi-wp-plugin'),
                 [
-                    sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $first_name),
+                    sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $pseudo),
                     '',
                     __('Le conseil d\'administration n\'a pas retenu ta demande d\'adhésion à Nyassobi cette fois-ci.', 'nyassobi-wp-plugin'),
                     __('Les informations que tu nous avais transmises ont été effacées.', 'nyassobi-wp-plugin'),
@@ -1254,6 +1269,13 @@ final class Nyassobi_Membership
             return;
         }
         $headers = ['Content-Type: text/plain; charset=UTF-8'];
+        $settings = self::get_settings();
+        // An address of the association's own domain passes the SPF check of
+        // nyassobi.fr; WordPress' default "wordpress@admin..." passes none.
+        if (is_email($settings['sender_email'] ?? '')) {
+            $name = str_replace(['"', "\r", "\n"], '', ($settings['sender_name'] ?? '') ?: 'Nyassobi');
+            $headers[] = sprintf('From: "%s" <%s>', $name, $settings['sender_email']);
+        }
         $main = class_exists('Nyassobi_WP_Plugin') ? Nyassobi_WP_Plugin::get_settings() : [];
         if ($reply_to_contact && is_email($main['contact_email'] ?? '')) {
             $headers[] = 'Reply-To: Nyassobi <' . $main['contact_email'] . '>';

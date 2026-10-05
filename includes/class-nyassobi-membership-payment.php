@@ -140,7 +140,7 @@ final class Nyassobi_Membership_Payment
         $ways = $this->paypal()->is_configured() ? __('par carte bancaire ou avec PayPal', 'nyassobi-wp-plugin') : __('par carte bancaire', 'nyassobi-wp-plugin');
 
         $lines = [
-            sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $this->meta($post_id, Nyassobi_Membership::META_FIRST_NAME)),
+            sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $this->meta($post_id, Nyassobi_Membership::META_PSEUDO)),
             '',
             __('Bonne nouvelle : le conseil d\'administration a accepté ta demande d\'adhésion à Nyassobi !', 'nyassobi-wp-plugin'),
             '',
@@ -199,7 +199,7 @@ final class Nyassobi_Membership_Payment
 
         $settings = $this->settings();
         $lines = [
-            sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $this->meta($post_id, Nyassobi_Membership::META_FIRST_NAME)),
+            sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $this->meta($post_id, Nyassobi_Membership::META_PSEUDO)),
             '',
             sprintf(__('Nous avons bien reçu ta cotisation %s : tu fais maintenant partie de Nyassobi, bienvenue !', 'nyassobi-wp-plugin'), $this->season()),
         ];
@@ -277,11 +277,11 @@ final class Nyassobi_Membership_Payment
             $id = (int) $id;
             $days = (time() - (int) $this->meta($id, self::META_ACCEPTED_AT)) / DAY_IN_SECONDS;
             $email = $this->meta($id, Nyassobi_Membership::META_EMAIL);
-            $first_name = $this->meta($id, Nyassobi_Membership::META_FIRST_NAME);
+            $pseudo = $this->meta($id, Nyassobi_Membership::META_PSEUDO);
 
             if ($days >= (int) $settings['expiry_days']) {
                 $membership->send_mail($email, __('Nyassobi : ta demande d\'adhésion a expiré', 'nyassobi-wp-plugin'), [
-                    sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $first_name),
+                    sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $pseudo),
                     '',
                     __('Ta cotisation n\'a pas été réglée à temps : ta demande d\'adhésion a expiré et tes informations ont été effacées.', 'nyassobi-wp-plugin'),
                     __('Tu peux refaire une demande quand tu veux depuis notre site. Si c\'est une erreur, réponds simplement à cet e-mail.', 'nyassobi-wp-plugin'),
@@ -293,7 +293,7 @@ final class Nyassobi_Membership_Payment
                 wp_delete_post($id, true);
             } elseif ($days >= (int) $settings['reminder_days'] && '' === $this->meta($id, self::META_REMINDED)) {
                 $membership->send_mail($email, __('Nyassobi : ta cotisation t\'attend', 'nyassobi-wp-plugin'), [
-                    sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $first_name),
+                    sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $pseudo),
                     '',
                     __('Petit rappel : ta demande d\'adhésion a été acceptée, il ne manque plus que ta cotisation pour la finaliser.', 'nyassobi-wp-plugin'),
                     $this->page_url($this->meta($id, self::META_TOKEN)),

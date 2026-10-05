@@ -144,6 +144,25 @@ donnée personnelle) pour l'inscrire au registre puis **finaliser**, ce qui effa
 données de WordPress. Sans paiement, une relance part après 7 jours et la demande expire
 après 30 (réglables), avec effacement des données.
 
+### Expéditeur des e-mails et spam
+
+Renseigner dans **Adhésions > Réglages** une adresse d'expédition en `@nyassobi.fr`
+(par exemple `adhesion@nyassobi.fr`). Sans elle, WordPress écrit au nom de « WordPress »
+depuis `wordpress@admin.nyassobi.fr`, un domaine sans SPF : direction les spams. Les
+réponses arrivent à l'adresse de contact des réglages Nyassobi.
+
+Côté domaine (espace client OVH, *Noms de domaine > nyassobi.fr*) :
+
+- **SPF** : déjà en place (`v=spf1 include:mx.ovh.com -all`), il couvre l'hébergement OVH.
+- **DKIM** : à activer (*Emails > DKIM*), pour que les e-mails soient signés.
+- **DMARC** : ajouter un enregistrement TXT `_dmarc` avec
+  `v=DMARC1; p=none; rua=mailto:<adresse du bureau>`, puis passer à `p=quarantine` une
+  fois les rapports propres. Gmail l'exige des expéditeurs depuis 2024.
+
+Pour vérifier : envoyer un e-mail de test à l'adresse donnée par <https://www.mail-tester.com>.
+Le plugin [WP Mail SMTP](https://wordpress.org/plugins/wp-mail-smtp/), configuré avec la
+boîte OVH de l'adresse d'expédition, améliore encore la délivrabilité.
+
 ### Rôle « Adhérent » sur Discord
 
 Facultatif : renseigner l'ID du serveur, celui du rôle « Adhérent » et une invitation. Le
