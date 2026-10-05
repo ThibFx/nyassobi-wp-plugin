@@ -121,7 +121,8 @@ add_filter('pre_http_request', static function ($pre, $args, $url) {
 
 /* Discord simulé : les messages postés ou modifiés par le plugin sont gardés ici. */
 add_filter('pre_http_request', static function ($pre, $args, $url) {
-    if (0 !== strpos((string) $url, 'https://discord.com/api/')) {
+    // Déjà simulé plus haut (rôles et membres du serveur).
+    if (false !== $pre || 0 !== strpos((string) $url, 'https://discord.com/api/')) {
         return $pre;
     }
     $messages = get_option(BAC_MESSAGES, []);

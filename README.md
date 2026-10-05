@@ -101,7 +101,8 @@ n'est pas exposée et le site renvoie vers l'ancien formulaire d'adhésion.
    Adhésions » par exemple).
 2. Onglet **Bot** : **Reset Token**, copier le jeton. Désactiver « Public Bot ».
 3. Onglet **Installation** (ou **OAuth2 > URL Generator**) : portée `bot`, permissions
-   « Voir les salons », « Envoyer des messages », « Intégrer des liens ». Ouvrir le lien
+   « Voir les salons », « Envoyer des messages », « Intégrer des liens », et « Gérer les
+   rôles » pour le rôle « Adhérent » automatique. Ouvrir le lien
    généré et ajouter l'application au serveur Nyassobi.
 4. Dans Discord, activer le mode développeur (Paramètres > Avancés), puis clic droit pour
    **Copier l'identifiant** du salon privé du CA et du rôle CA. Vérifier que le bot a accès
@@ -113,6 +114,44 @@ n'est pas exposée et le site renvoie vers l'ancien formulaire d'adhésion.
    **Interactions Endpoint URL** l'adresse affichée sur la page de réglages
    (`https://admin.nyassobi.fr/wp-json/nyassobi/v1/discord`) et enregistrer : Discord
    vérifie l'adresse sur-le-champ, la sauvegarde échoue si quelque chose cloche.
+
+### Paiement de la cotisation
+
+Une fois la demande acceptée, la personne reçoit un lien vers sa page personnelle sur le
+site (`/cotisation/<jeton>`). Le paiement HelloAsso ou PayPal n'est créé qu'au clic : un
+lien HelloAsso ne reste valable que 15 minutes, il ne peut donc pas partir par e-mail.
+
+- **Carte bancaire, par HelloAsso** (sans frais pour l'asso). Dans le back-office HelloAsso,
+  *Mon compte > Intégrations et API* : créer une clé API et recopier le client ID et le
+  client secret dans **Adhésions > Réglages**, avec le nom de l'association tel qu'il
+  apparaît dans l'adresse (`nyassobi`). Dans *Notifications*, indiquer l'adresse affichée
+  sur la page de réglages (`…/wp-json/nyassobi/v1/helloasso`) : elle sert quand la personne
+  ferme l'onglet avant de revenir sur le site. Chaque notification est revérifiée auprès de
+  l'API HelloAsso (elles ne sont pas signées pour les associations).
+- **PayPal** : désactivé tant que ses clés sont vides. Il faut un compte PayPal Business
+  au nom de l'asso, puis sur <https://developer.paypal.com>, *Apps & Credentials* > *Live* :
+  créer une application et recopier son client ID et son secret. PayPal prélève une
+  commission sur chaque paiement, contrairement à HelloAsso.
+- Sans clés HelloAsso, le lien de paiement de secours est proposé et le bureau marque la
+  cotisation payée à la main depuis la fiche (bouton « Marquer la cotisation comme payée »,
+  utile aussi pour un paiement en espèces en convention).
+- Les deux ont un environnement de test (cases à cocher dans les réglages) : HelloAsso sur
+  helloasso-sandbox.com avec des cartes fictives, PayPal avec des comptes fictifs.
+
+Au paiement : la demande passe « Cotisation payée », la personne reçoit l'e-mail de
+bienvenue, le message du CA affiche « cotisation reçue », et le bureau est prévenu (sans
+donnée personnelle) pour l'inscrire au registre puis **finaliser**, ce qui efface ses
+données de WordPress. Sans paiement, une relance part après 7 jours et la demande expire
+après 30 (réglables), avec effacement des données.
+
+### Rôle « Adhérent » sur Discord
+
+Facultatif : renseigner l'ID du serveur, celui du rôle « Adhérent » et une invitation. Le
+formulaire propose alors de donner son pseudo Discord, et le rôle est donné dès le paiement.
+Le bot doit avoir la permission **Gérer les rôles**, et son propre rôle doit être placé
+**au-dessus** du rôle « Adhérent » dans la liste des rôles du serveur. Si le pseudo n'est pas
+trouvé (pas encore sur le serveur, faute de frappe), le message du CA le signale et l'e-mail
+de bienvenue contient l'invitation.
 
 ### Mutation
 
@@ -126,7 +165,10 @@ mutation Join($input: SubmitNyassobiMembershipInput!) {
 ```
 
 Champs de `input` : `pseudo`, `firstName`, `lastName`, `birthDate` (`AAAA-MM-JJ`), `email`,
-`reducedRate`, `acceptsRules`, `acceptsPrivacy`. Trois demandes par heure au plus depuis une
+`reducedRate`, `acceptsRules`, `acceptsPrivacy`, et facultatifs `discordUsername` et
+`parentalAuthorization` (obligatoire pour les mineurs : `{ fileName, mimeType, base64 }`).
+Requêtes associées : `nyassobiMembershipOpen`, `nyassobiMembershipFees`,
+`nyassobiCotisation(token)`. Trois demandes par heure au plus depuis une
 même connexion, et une seule demande en cours par adresse e-mail.
 
 ### Bac à sable
@@ -139,7 +181,10 @@ Pour essayer tout le circuit sans rien envoyer, un WordPress de test tourne sur 
 ```
 
 - `http://<pi>:8504/bac-a-sable/` : Discord simulé (on vote à la place des 6 membres du CA,
-  ou d'une personne hors CA) et les e-mails qui seraient partis. Bouton de remise à zéro.
+  ou d'une personne hors CA), les e-mails qui seraient partis, les cotisations en attente
+  (boutons « +7 jours » et « +30 jours » pour voir la relance et l'expiration) et les rôles
+  donnés. HelloAsso et PayPal sont remplacés par une page de paiement factice. Un pseudo
+  Discord contenant « absent » simule quelqu'un qui n'est pas sur le serveur.
 - `http://<pi>:8504/wp-admin/` : la vue du bureau. Identifiants dans
   `~/nyassobi-bac-a-sable/IDENTIFIANTS.txt` sur la Pi.
 - `http://<pi>:8505/` : la copie du site branchée sur ce WordPress, déployée depuis le dépôt

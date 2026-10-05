@@ -1212,6 +1212,12 @@ final class Nyassobi_Membership
     public function notify_decision(int $post_id): void
     {
         $status = (string) get_post_meta($post_id, self::META_STATUS, true);
+        // WP-Cron can run the same event twice at once (two visits, or a
+        // manual run): add_post_meta with $unique fails for the second one,
+        // so a decision is announced exactly once.
+        if (! in_array($status, [self::STATUS_ACCEPTED, self::STATUS_REFUSED], true) || ! add_post_meta($post_id, '_nyassobi_decision_notified', $status, true)) {
+            return;
+        }
         $email = (string) get_post_meta($post_id, self::META_EMAIL, true);
         $first_name = (string) get_post_meta($post_id, self::META_FIRST_NAME, true);
         $settings = self::get_settings();
