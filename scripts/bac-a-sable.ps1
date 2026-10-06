@@ -33,4 +33,4 @@ $commande = "set -e; mkdir -p ~/$dossier/plugin ~/$dossier/mu && cd ~/$dossier; 
 ssh $Hote $commande
 if ($LASTEXITCODE -ne 0) { Write-Host "ECHEC: installation sur la Pi" -ForegroundColor Red; exit 1 }
 
-Write-Host "`nBac a sable: http://nv-pi:8504/bac-a-sable/ (Tailscale: http://nv-pi:8504/bac-a-sable/)" -ForegroundColor Green
+Write-Host "`nBac a sable: http://nv-pi:8504/bac-a-sable/" -ForegroundColor Green

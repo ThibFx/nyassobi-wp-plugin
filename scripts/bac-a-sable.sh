@@ -31,4 +31,4 @@ ssh "$HOTE" "set -e
   cp -r .arrivee/bac-a-sable/. . && rm -rf .arrivee
   bash installer.sh"
 
-printf '\n\033[32mBac à sable : http://nv-pi:8504/bac-a-sable/ (Tailscale : http://nv-pi:8504/bac-a-sable/)\033[0m\n'
+printf '\n\033[32mBac à sable : http://nv-pi:8504/bac-a-sable/\033[0m\n'
