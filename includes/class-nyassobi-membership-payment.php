@@ -29,6 +29,8 @@ final class Nyassobi_Membership_Payment
     private const META_PAID_AT = '_nyassobi_paid_at';
     private const META_PAID_VIA = '_nyassobi_paid_via';
     private const META_FINALIZE_REMINDED = '_nyassobi_finalize_reminded';
+    /** Season the fee was paid for, fixed at payment time (see season()). */
+    private const META_SEASON = '_nyassobi_season';
     private const META_HELLOASSO_INTENTS = '_nyassobi_helloasso_intents';
     private const META_PAYPAL_ORDERS = '_nyassobi_paypal_orders';
 
@@ -103,9 +105,16 @@ final class Nyassobi_Membership_Payment
         return '' !== $retour ? add_query_arg('retour', $retour, $url) : $url;
     }
 
-    /** Membership year, September to August, as written on the receipt. */
-    private function season(): string
+    /**
+     * Membership year, September to August, as written on the receipt.
+     * Given a request, the season it was paid for once paid.
+     */
+    private function season(int $post_id = 0): string
     {
+        $paid_for = $post_id ? $this->meta($post_id, self::META_SEASON) : '';
+        if ('' !== $paid_for) {
+            return $paid_for;
+        }
         $now = new \DateTimeImmutable('now', wp_timezone());
         $start = (int) $now->format('n') >= 9 ? (int) $now->format('Y') : (int) $now->format('Y') - 1;
 
@@ -188,6 +197,9 @@ final class Nyassobi_Membership_Payment
             update_post_meta($post_id, Nyassobi_Membership::META_STATUS, Nyassobi_Membership::STATUS_PAID);
             update_post_meta($post_id, self::META_PAID_AT, (string) time());
             update_post_meta($post_id, self::META_PAID_VIA, $via);
+            // Fixed now: an export made after 1 September must not move a
+            // fee paid in August to the next season.
+            update_post_meta($post_id, self::META_SEASON, $this->season());
         } finally {
             $membership->release_lock($post_id);
         }
@@ -207,7 +219,7 @@ final class Nyassobi_Membership_Payment
         $lines = [
             sprintf(__('Bonjour %s,', 'nyassobi-wp-plugin'), $this->meta($post_id, Nyassobi_Membership::META_PSEUDO)),
             '',
-            sprintf(__('Nous avons bien reçu ta cotisation %s : tu fais maintenant partie de Nyassobi, bienvenue !', 'nyassobi-wp-plugin'), $this->season()),
+            sprintf(__('Nous avons bien reçu ta cotisation %s : tu fais maintenant partie de Nyassobi, bienvenue !', 'nyassobi-wp-plugin'), $this->season($post_id)),
         ];
         if ('given' === $role) {
             $lines[] = __('Ton rôle « Adhérent » t\'attend déjà sur notre serveur Discord.', 'nyassobi-wp-plugin');
@@ -426,7 +438,7 @@ final class Nyassobi_Membership_Payment
             'status' => Nyassobi_Membership::STATUS_PAID === $status ? 'payee' : 'a_payer',
             'amount' => $this->fee_euros($post_id),
             'reducedRate' => '1' === $this->meta($post_id, Nyassobi_Membership::META_REDUCED_RATE),
-            'season' => $this->season(),
+            'season' => $this->season($post_id),
             'cardUrl' => $helloasso ? $pay('helloasso') : (($settings['payment_url'] ?? '') ?: null),
             'cardAutomatic' => $helloasso,
             'paypalUrl' => $this->paypal()->is_configured() ? $pay('paypal') : null,
@@ -636,7 +648,7 @@ final class Nyassobi_Membership_Payment
                 $format_date($birth),
                 null !== $age && $age < 18 ? 'oui' : 'non',
                 wp_date('d/m/Y', (int) $this->meta($id, self::META_PAID_AT)),
-                $this->season(),
+                $this->season($id),
                 (string) $this->fee_euros($id),
                 '1' === $this->meta($id, Nyassobi_Membership::META_REDUCED_RATE) ? 'réduit' : 'normal',
                 self::VIA_LABELS[$this->meta($id, self::META_PAID_VIA)] ?? '',
@@ -714,7 +726,7 @@ final class Nyassobi_Membership_Payment
         $rows[__('Cotisation', 'nyassobi-wp-plugin')] = sprintf('%d €', $this->fee_euros($post_id));
         $paid_at = (int) $this->meta($post_id, self::META_PAID_AT);
         if ($paid_at) {
-            $rows[__('Payée le', 'nyassobi-wp-plugin')] = wp_date('j F Y à H:i', $paid_at) . ' · ' . (self::VIA_LABELS[$this->meta($post_id, self::META_PAID_VIA)] ?? '');
+            $rows[__('Payée le', 'nyassobi-wp-plugin')] = wp_date('j F Y à H:i', $paid_at) . ' · ' . (self::VIA_LABELS[$this->meta($post_id, self::META_PAID_VIA)] ?? '') . ' · ' . sprintf(__('saison %s', 'nyassobi-wp-plugin'), $this->season($post_id));
             $rows[__('Effacement automatique', 'nyassobi-wp-plugin')] = wp_date('j F Y', $paid_at + (int) $this->settings()['paid_retention_days'] * DAY_IN_SECONDS) . ' ' . __('(sauf finalisation avant)', 'nyassobi-wp-plugin');
         } elseif ($accepted = (int) $this->meta($post_id, self::META_ACCEPTED_AT)) {
             $rows[__('Acceptée le', 'nyassobi-wp-plugin')] = wp_date('j F Y', $accepted) . ('' !== $this->meta($post_id, self::META_REMINDED) ? ' · ' . __('relance envoyée', 'nyassobi-wp-plugin') : '');
