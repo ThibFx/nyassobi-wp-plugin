@@ -155,7 +155,7 @@ final class Nyassobi_Membership_Payment
         update_post_meta($post_id, self::META_ACCEPTED_AT, (string) time());
 
         $settings = $this->settings();
-        $age = Nyassobi_Membership::age_from_birth_date($this->meta($post_id, Nyassobi_Membership::META_BIRTH_DATE));
+        $minor = '1' === $this->meta($post_id, Nyassobi_Membership::META_MINOR);
         $reduced = '1' === $this->meta($post_id, Nyassobi_Membership::META_REDUCED_RATE);
         $ways = $this->paypal()->is_configured() ? __('par carte bancaire ou avec PayPal', 'nyassobi-wp-plugin') : __('par carte bancaire', 'nyassobi-wp-plugin');
 
@@ -176,7 +176,7 @@ final class Nyassobi_Membership_Payment
             '',
             sprintf(__('Ce lien est personnel. Sans paiement d\'ici %d jours, la demande expirera et tes informations seront effacées.', 'nyassobi-wp-plugin'), (int) $settings['expiry_days']),
         ];
-        if (null !== $age && $age < 18) {
+        if ($minor) {
             $lines[] = '';
             $lines[] = __('Nous avons bien ton autorisation parentale : le bureau la vérifie au moment de finaliser ton adhésion.', 'nyassobi-wp-plugin');
         }
@@ -342,7 +342,7 @@ final class Nyassobi_Membership_Payment
             'edit.php?post_type=' . Nyassobi_Membership::POST_TYPE,
             __('Rappel de renouvellement', 'nyassobi-wp-plugin'),
             __('Rappel de fin de saison', 'nyassobi-wp-plugin'),
-            Nyassobi_Membership::CAPABILITY,
+            Nyassobi_Membership::CAP_ADHESIONS,
             'nyassobi-renouvellement',
             [$this, 'render_renewal_page']
         );
@@ -350,7 +350,7 @@ final class Nyassobi_Membership_Payment
 
     public function render_renewal_page(): void
     {
-        if (! current_user_can(Nyassobi_Membership::CAPABILITY)) {
+        if (! current_user_can(Nyassobi_Membership::CAP_ADHESIONS)) {
             return;
         }
         $season = $this->season();
@@ -376,7 +376,7 @@ final class Nyassobi_Membership_Payment
 
     public function send_renewal_from_register(): void
     {
-        if (! current_user_can(Nyassobi_Membership::CAPABILITY) || ! check_admin_referer('nyassobi_renewal_send')) {
+        if (! current_user_can(Nyassobi_Membership::CAP_ADHESIONS) || ! check_admin_referer('nyassobi_renewal_send')) {
             wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
         }
         $this->send_renewal_to((string) wp_unslash($_POST['adresses'] ?? ''), true);
@@ -746,15 +746,22 @@ final class Nyassobi_Membership_Payment
 
     public function export_button(string $post_type): void
     {
-        if (Nyassobi_Membership::POST_TYPE !== $post_type || ! current_user_can(Nyassobi_Membership::CAPABILITY)) {
+        if (Nyassobi_Membership::POST_TYPE !== $post_type || ! current_user_can(Nyassobi_Membership::CAP_ADHESIONS)) {
             return;
         }
         $count = count($this->paid_ids());
-        printf(
-            '<a class="button button-primary" href="%s" style="margin-left:6px">%s</a>',
-            esc_url(wp_nonce_url(admin_url('admin-post.php?action=nyassobi_membership_export'), 'nyassobi_membership_export')),
-            esc_html(sprintf(_n('Exporter %d adhésion payée pour le registre (Excel)', 'Exporter %d adhésions payées pour le registre (Excel)', $count, 'nyassobi-wp-plugin'), $count))
-        );
+        // The export holds decrypted identities: it is behind the bureau
+        // passphrase. Rendered after the list filters' form, not inside it.
+        add_action('admin_footer', static function () use ($count): void {
+            printf(
+                '<div id="nyassobi-export" style="margin:12px 0">%s</div><script>(function(){var b=document.getElementById("nyassobi-export"),t=document.querySelector(".wp-header-end");if(b&&t){t.parentNode.insertBefore(b,t.nextSibling);}})();</script>',
+                Nyassobi_Membership::passphrase_form(
+                    'nyassobi_membership_export',
+                    'nyassobi_membership_export',
+                    sprintf(_n('Exporter %d adhésion payée pour le registre (Excel)', 'Exporter %d adhésions payées pour le registre (Excel)', $count, 'nyassobi-wp-plugin'), $count)
+                ) // phpcs:ignore
+            );
+        });
     }
 
     /**
@@ -765,24 +772,28 @@ final class Nyassobi_Membership_Payment
      */
     public function export_register(): void
     {
-        if (! current_user_can(Nyassobi_Membership::CAPABILITY) || ! check_admin_referer('nyassobi_membership_export')) {
+        if (! current_user_can(Nyassobi_Membership::CAP_ADHESIONS) || ! check_admin_referer('nyassobi_membership_export')) {
             wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
         }
+        $pair = Nyassobi_Vault::unlock((string) wp_unslash($_POST['passphrase'] ?? ''));
+        if (null === $pair) {
+            wp_die(esc_html__('Mot de passe du bureau incorrect.', 'nyassobi-wp-plugin'), '', ['back_link' => true]);
+        }
+        $open = fn (int $id, string $key): string => (string) (Nyassobi_Vault::open($this->meta($id, $key), $pair) ?? __('(illisible)', 'nyassobi-wp-plugin'));
         $format_date = static function (string $iso): string {
             $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $iso);
             return $date ? $date->format('d/m/Y') : $iso;
         };
         $rows = [['Nom', 'Prénom', 'Date de naissance', 'E-mail', 'Mineur', 'Date d\'adhésion', 'Saison', 'Cotisation (€)', 'Tarif', 'Payée par', 'N° de demande']];
         foreach ($this->paid_ids() as $id) {
-            $birth = $this->meta($id, Nyassobi_Membership::META_BIRTH_DATE);
-            $age = Nyassobi_Membership::age_from_birth_date($birth);
+            $birth = $open($id, Nyassobi_Membership::META_BIRTH_DATE);
             $rows[] = [
-                $this->meta($id, Nyassobi_Membership::META_LAST_NAME),
-                $this->meta($id, Nyassobi_Membership::META_FIRST_NAME),
+                $open($id, Nyassobi_Membership::META_LAST_NAME),
+                $open($id, Nyassobi_Membership::META_FIRST_NAME),
                 $format_date($birth),
                 // Kept in the register for the end-of-season renewal reminder.
                 $this->meta($id, Nyassobi_Membership::META_EMAIL),
-                null !== $age && $age < 18 ? 'oui' : 'non',
+                '1' === $this->meta($id, Nyassobi_Membership::META_MINOR) ? 'oui' : 'non',
                 wp_date('d/m/Y', (int) $this->meta($id, self::META_PAID_AT)),
                 $this->season($id),
                 (string) $this->fee_euros($id),
@@ -803,6 +814,7 @@ final class Nyassobi_Membership_Payment
             fputcsv($out, $row, ';', '"', '\\', "\r\n");
         }
         fclose($out);
+        sodium_memzero($pair);
         exit;
     }
 
@@ -824,7 +836,7 @@ final class Nyassobi_Membership_Payment
      */
     public function handle_bulk_finalize(string $redirect, string $action, array $ids): string
     {
-        if ('nyassobi_finaliser' !== $action || ! current_user_can(Nyassobi_Membership::CAPABILITY)) {
+        if ('nyassobi_finaliser' !== $action || ! current_user_can(Nyassobi_Membership::CAP_ADHESIONS)) {
             return $redirect;
         }
         $done = 0;

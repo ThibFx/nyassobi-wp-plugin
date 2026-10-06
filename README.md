@@ -115,6 +115,17 @@ n'est pas exposée et le site renvoie vers l'ancien formulaire d'adhésion.
    (`https://admin.nyassobi.fr/wp-json/nyassobi/v1/discord`) et enregistrer : Discord
    vérifie l'adresse sur-le-champ, la sauvegarde échoue si quelque chose cloche.
 
+### Bureau et chiffrement des données
+
+Dans **Adhésions > Réglages**, en bas de page : choisir les comptes WordPress du bureau (seuls
+eux voient les demandes, pas les autres administrateurs) et le **mot de passe du bureau**. Nom,
+prénom, date de naissance et autorisation parentale sont chiffrés dès leur arrivée (libsodium) :
+ni un autre administrateur ni l'hébergeur ne peuvent les lire. Ils s'affichent sur la fiche, et
+dans l'export Excel, après saisie de ce mot de passe. Pseudo et e-mail restent en clair : le site
+en a besoin pour fonctionner seul. Tant que le mot de passe n'est pas choisi, le circuit reste
+fermé. S'il est perdu, les demandes en cours deviennent illisibles (le registre, lui, est hors
+ligne).
+
 ### Paiement de la cotisation
 
 Une fois la demande acceptée, la personne reçoit un lien vers sa page personnelle sur le

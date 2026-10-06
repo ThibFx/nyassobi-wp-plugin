@@ -17,6 +17,7 @@ if (! defined('ABSPATH')) {
 }
 
 require __DIR__ . '/includes/class-nyassobi-wp-plugin.php';
+require __DIR__ . '/includes/class-nyassobi-vault.php';
 require __DIR__ . '/includes/class-nyassobi-membership.php';
 require __DIR__ . '/includes/class-nyassobi-payment-gateways.php';
 require __DIR__ . '/includes/class-nyassobi-membership-payment.php';

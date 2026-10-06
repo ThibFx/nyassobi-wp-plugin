@@ -78,6 +78,14 @@ $principal["contact_email"] = "contact@bac-a-sable.test";
 update_option("nyassobi_wp_plugin", $principal);
 '
 
+# Mot de passe du bureau (chiffrement des identités) et compte du bureau.
+if ! grep -q "Mot de passe du bureau" IDENTIFIANTS.txt 2>/dev/null; then
+  COFFRE="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)"
+  wp eval "Nyassobi_Vault::setup('$COFFRE');"
+  printf 'Mot de passe du bureau (données chiffrées) : %s\n' "$COFFRE" >> IDENTIFIANTS.txt
+fi
+wp eval 'update_option("nyassobi_bureau_users", [get_user_by("login", "bureau")->ID], false);'
+
 OUVERT="$(curl -s -X POST http://localhost:8504/index.php?graphql -H 'content-type: application/json' -d '{"query":"{ nyassobiMembershipOpen }"}')"
 echo "  $OUVERT"
 echo "### Bac à sable prêt"

@@ -29,6 +29,13 @@ final class Nyassobi_Membership
     private const OPTION_GROUP = 'nyassobi_membership_group';
     private const PAGE_SLUG = 'nyassobi-membership';
     public const CAPABILITY = 'manage_options';
+    /**
+     * Reading and handling membership requests. Granted only to the bureau
+     * accounts chosen in the settings (see grant_bureau_cap()), not to every
+     * administrator.
+     */
+    public const CAP_ADHESIONS = 'nyassobi_adhesions';
+    private const BUREAU_OPTION = 'nyassobi_bureau_users';
     public const REST_NAMESPACE = 'nyassobi/v1';
     private const DISCORD_API = 'https://discord.com/api/v10';
     private const CUSTOM_ID_PREFIX = 'nyassobi_vote';
@@ -49,6 +56,8 @@ final class Nyassobi_Membership
     public const META_DISCORD_MESSAGE = '_nyassobi_discord_message';
     private const META_PARENTAL_FILE = '_nyassobi_parental_file';
     private const META_PARENTAL_MIME = '_nyassobi_parental_mime';
+    /** Kept in clear (instead of the encrypted birth date) for the rate and the emails. */
+    public const META_MINOR = '_nyassobi_minor';
 
     /** Signed parental authorization: a scan or a phone photo. */
     private const PARENTAL_MAX_BYTES = 5 * 1024 * 1024;
@@ -98,7 +107,9 @@ final class Nyassobi_Membership
         add_action('admin_menu', [$this, 'register_settings_page']);
         add_action('add_meta_boxes', [$this, 'register_metabox']);
         add_action('admin_post_nyassobi_membership_action', [$this, 'handle_admin_action']);
-        add_action('admin_post_nyassobi_membership_file', [$this, 'download_parental_file']);
+        add_action('admin_post_nyassobi_membership_reveal', [$this, 'reveal_identity']);
+        add_action('admin_post_nyassobi_vault', [$this, 'handle_vault_form']);
+        add_filter('user_has_cap', [$this, 'grant_bureau_cap'], 10, 3);
         add_action('before_delete_post', [$this, 'delete_parental_file']);
         add_filter('manage_' . self::POST_TYPE . '_posts_columns', [$this, 'admin_columns']);
         add_action('manage_' . self::POST_TYPE . '_posts_custom_column', [$this, 'render_admin_column'], 10, 2);
@@ -130,17 +141,17 @@ final class Nyassobi_Membership
 
     public function register_post_type(): void
     {
-        // Every capability maps to manage_options: editors and authors must
-        // not be able to read members' personal data.
+        // Every capability maps to the bureau's own: other administrators,
+        // editors and authors cannot open the requests.
         $caps = [
-            'edit_post' => self::CAPABILITY,
-            'read_post' => self::CAPABILITY,
-            'delete_post' => self::CAPABILITY,
-            'edit_posts' => self::CAPABILITY,
-            'edit_others_posts' => self::CAPABILITY,
-            'delete_posts' => self::CAPABILITY,
-            'publish_posts' => self::CAPABILITY,
-            'read_private_posts' => self::CAPABILITY,
+            'edit_post' => self::CAP_ADHESIONS,
+            'read_post' => self::CAP_ADHESIONS,
+            'delete_post' => self::CAP_ADHESIONS,
+            'edit_posts' => self::CAP_ADHESIONS,
+            'edit_others_posts' => self::CAP_ADHESIONS,
+            'delete_posts' => self::CAP_ADHESIONS,
+            'publish_posts' => self::CAP_ADHESIONS,
+            'read_private_posts' => self::CAP_ADHESIONS,
             'create_posts' => 'do_not_allow',
         ];
 
@@ -395,9 +406,15 @@ final class Nyassobi_Membership
         return $settings;
     }
 
-    /** The flow is only offered once Discord is fully configured. */
+    /**
+     * The flow is only offered once Discord is configured and the bureau has
+     * set its passphrase: no request can ever be stored unencrypted.
+     */
     private function is_configured(): bool
     {
+        if (! Nyassobi_Vault::is_ready()) {
+            return false;
+        }
         $settings = self::get_settings();
         foreach (['discord_application_id', 'discord_public_key', 'discord_bot_token', 'discord_channel_id', 'discord_board_role_id'] as $key) {
             if ('' === trim($settings[$key] ?? '')) {
@@ -480,9 +497,16 @@ final class Nyassobi_Membership
         ?>
         <div class="wrap">
             <h1><?php echo esc_html__('Réglages des adhésions', 'nyassobi-wp-plugin'); ?></h1>
+            <?php
+            $notice = get_transient('nyassobi_vault_notice_' . get_current_user_id());
+            if ($notice) {
+                delete_transient('nyassobi_vault_notice_' . get_current_user_id());
+                printf('<div class="notice notice-success"><p>%s</p></div>', esc_html((string) $notice));
+            }
+            ?>
             <?php if (! $this->is_configured()) : ?>
                 <div class="notice notice-warning"><p>
-                    <?php esc_html_e('Tant que Discord n\'est pas entièrement configuré, le site continue d\'envoyer vers l\'ancien formulaire d\'adhésion.', 'nyassobi-wp-plugin'); ?>
+                    <?php esc_html_e('Tant que Discord n\'est pas entièrement configuré et que le mot de passe du bureau n\'est pas choisi (en bas de page), le site continue d\'envoyer vers l\'ancien formulaire d\'adhésion.', 'nyassobi-wp-plugin'); ?>
                 </p></div>
             <?php endif; ?>
             <form action="options.php" method="post">
@@ -492,6 +516,7 @@ final class Nyassobi_Membership
                 submit_button();
                 ?>
             </form>
+            <?php $this->render_bureau_box(); ?>
             <?php do_action('nyassobi_membership_settings_after'); ?>
         </div>
         <?php
@@ -731,9 +756,11 @@ final class Nyassobi_Membership
 
         wp_update_post(['ID' => $post_id, 'post_title' => sprintf(__('Demande n°%d', 'nyassobi-wp-plugin'), $post_id)]);
         update_post_meta($post_id, self::META_PSEUDO, $pseudo);
-        update_post_meta($post_id, self::META_FIRST_NAME, $first_name);
-        update_post_meta($post_id, self::META_LAST_NAME, $last_name);
-        update_post_meta($post_id, self::META_BIRTH_DATE, $birth_date);
+        // Identity is encrypted for the bureau before it is ever written.
+        update_post_meta($post_id, self::META_FIRST_NAME, Nyassobi_Vault::seal($first_name));
+        update_post_meta($post_id, self::META_LAST_NAME, Nyassobi_Vault::seal($last_name));
+        update_post_meta($post_id, self::META_BIRTH_DATE, Nyassobi_Vault::seal($birth_date));
+        update_post_meta($post_id, self::META_MINOR, $age < 18 ? '1' : '0');
         update_post_meta($post_id, self::META_EMAIL, $email);
         update_post_meta($post_id, self::META_EMAIL_HASH, $email_hash);
         // Minors always pay the reduced rate.
@@ -842,7 +869,7 @@ final class Nyassobi_Membership
     private function store_parental_file(int $post_id, array $file): bool
     {
         $name = bin2hex(random_bytes(16)) . '.' . self::PARENTAL_TYPES[$file['mime']];
-        if (false === file_put_contents(self::private_dir() . '/' . $name, $file['bytes'])) {
+        if (false === file_put_contents(self::private_dir() . '/' . $name, Nyassobi_Vault::seal($file['bytes']))) {
             return false;
         }
         update_post_meta($post_id, self::META_PARENTAL_FILE, $name);
@@ -874,23 +901,209 @@ final class Nyassobi_Membership
         }
     }
 
-    public function download_parental_file(): void
+    /* ------------------------------------------------------------------
+     * Bureau access and the encrypted identity
+     * ------------------------------------------------------------------ */
+
+    /** @return int[] WordPress accounts of the bureau. */
+    public static function bureau_ids(): array
     {
-        $post_id = isset($_GET['post']) ? (int) $_GET['post'] : 0;
-        if (! current_user_can(self::CAPABILITY) || ! check_admin_referer('nyassobi_membership_file_' . $post_id)) {
+        return array_values(array_filter(array_map('intval', (array) get_option(self::BUREAU_OPTION, []))));
+    }
+
+    /**
+     * Grants the membership capability to the bureau accounts only. Until
+     * the bureau is chosen, administrators have it, so that someone can set
+     * things up.
+     *
+     * @param array<string,bool> $allcaps
+     * @param string[]           $caps
+     * @param array<int,mixed>   $args
+     *
+     * @return array<string,bool>
+     */
+    public function grant_bureau_cap(array $allcaps, array $caps, array $args): array
+    {
+        if (! in_array(self::CAP_ADHESIONS, $caps, true)) {
+            return $allcaps;
+        }
+        $bureau = self::bureau_ids();
+        $user_id = (int) ($args[1] ?? 0);
+        $allcaps[self::CAP_ADHESIONS] = $bureau ? in_array($user_id, $bureau, true) : ! empty($allcaps[self::CAPABILITY]);
+
+        return $allcaps;
+    }
+
+    /**
+     * Shows a request's identity and parental authorization, decrypted with
+     * the bureau passphrase for this page only. Nothing decrypted is stored.
+     */
+    public function reveal_identity(): void
+    {
+        $post_id = isset($_POST['post']) ? (int) $_POST['post'] : 0;
+        if (! current_user_can(self::CAP_ADHESIONS) || ! check_admin_referer('nyassobi_membership_reveal_' . $post_id)) {
             wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
         }
-        $path = self::parental_path($post_id);
-        if (null === $path) {
-            wp_die(esc_html__('Document introuvable.', 'nyassobi-wp-plugin'));
+        $post = get_post($post_id);
+        if (! $post instanceof \WP_Post || self::POST_TYPE !== $post->post_type) {
+            wp_die(esc_html__('Demande introuvable.', 'nyassobi-wp-plugin'));
         }
-        $mime = (string) get_post_meta($post_id, self::META_PARENTAL_MIME, true);
+        $pair = Nyassobi_Vault::unlock((string) wp_unslash($_POST['passphrase'] ?? ''));
+        $back = admin_url('post.php?post=' . $post_id . '&action=edit');
+        if (null === $pair) {
+            wp_die(esc_html__('Mot de passe du bureau incorrect.', 'nyassobi-wp-plugin'), '', ['back_link' => true]);
+        }
+
+        $field = fn (string $key): string => (string) (Nyassobi_Vault::open((string) get_post_meta($post_id, $key, true), $pair) ?? __('(illisible)', 'nyassobi-wp-plugin'));
+        $birth = $field(self::META_BIRTH_DATE);
+        $rows = [
+            __('Pseudo', 'nyassobi-wp-plugin') => (string) get_post_meta($post_id, self::META_PSEUDO, true),
+            __('Prénom', 'nyassobi-wp-plugin') => $field(self::META_FIRST_NAME),
+            __('Nom', 'nyassobi-wp-plugin') => $field(self::META_LAST_NAME),
+            __('Date de naissance', 'nyassobi-wp-plugin') => $birth,
+            __('E-mail', 'nyassobi-wp-plugin') => (string) get_post_meta($post_id, self::META_EMAIL, true),
+        ];
+        $html = '<h1>' . esc_html(sprintf(__('Demande n°%d', 'nyassobi-wp-plugin'), $post_id)) . '</h1><table class="widefat striped" style="max-width:640px"><tbody>';
+        foreach ($rows as $label => $value) {
+            $html .= sprintf('<tr><th style="width:40%%">%s</th><td>%s</td></tr>', esc_html($label), esc_html($value));
+        }
+        $html .= '</tbody></table>';
+
+        $path = self::parental_path($post_id);
+        if (null !== $path) {
+            $bytes = Nyassobi_Vault::open((string) file_get_contents($path), $pair);
+            $mime = (string) get_post_meta($post_id, self::META_PARENTAL_MIME, true);
+            if (null !== $bytes && isset(self::PARENTAL_TYPES[$mime])) {
+                $data = 'data:' . $mime . ';base64,' . base64_encode($bytes);
+                $html .= '<h2>' . esc_html__('Autorisation parentale', 'nyassobi-wp-plugin') . '</h2>';
+                $html .= 'application/pdf' === $mime
+                    ? sprintf('<object data="%s" type="application/pdf" style="width:100%%;height:70vh"></object>', esc_attr($data))
+                    : sprintf('<img src="%s" alt="" style="max-width:100%%;max-height:70vh">', esc_attr($data));
+                $html .= sprintf('<p><a class="button" download="autorisation-parentale-%d.%s" href="%s">%s</a></p>', $post_id, esc_attr(self::PARENTAL_TYPES[$mime]), esc_attr($data), esc_html__('Télécharger', 'nyassobi-wp-plugin'));
+            }
+        }
+        sodium_memzero($pair);
+        $html .= sprintf('<p><a href="%s">%s</a></p>', esc_url($back), esc_html__('← Retour à la demande', 'nyassobi-wp-plugin'));
+
         nocache_headers();
-        header('Content-Type: ' . (isset(self::PARENTAL_TYPES[$mime]) ? $mime : 'application/octet-stream'));
-        header('Content-Disposition: inline; filename="autorisation-parentale-' . $post_id . '.' . pathinfo($path, PATHINFO_EXTENSION) . '"');
-        header('X-Content-Type-Options: nosniff');
-        header('Content-Length: ' . filesize($path));
-        readfile($path);
+        wp_die($html, esc_html__('Demande d\'adhésion', 'nyassobi-wp-plugin'), ['response' => 200]); // phpcs:ignore WordPress.Security.EscapeOutput -- built from escaped parts.
+    }
+
+    /** A small form asking for the bureau passphrase before an action. */
+    public static function passphrase_form(string $action, string $nonce_action, string $button, array $hidden = []): string
+    {
+        $fields = '';
+        foreach ($hidden as $name => $value) {
+            $fields .= sprintf('<input type="hidden" name="%s" value="%s">', esc_attr($name), esc_attr((string) $value));
+        }
+
+        return sprintf(
+            '<form method="post" action="%1$s" style="display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap"><input type="hidden" name="action" value="%2$s">%3$s%4$s<input type="password" name="passphrase" placeholder="%5$s" autocomplete="off" required class="regular-text" style="width:16em"><button class="button button-primary">%6$s</button></form>',
+            esc_url(admin_url('admin-post.php')),
+            esc_attr($action),
+            wp_nonce_field($nonce_action, '_wpnonce', true, false),
+            $fields,
+            esc_attr__('Mot de passe du bureau', 'nyassobi-wp-plugin'),
+            esc_html($button)
+        );
+    }
+
+    /** Bureau accounts and the vault passphrase, on the settings page. */
+    private function render_bureau_box(): void
+    {
+        $can_edit = ! self::bureau_ids() || in_array(get_current_user_id(), self::bureau_ids(), true);
+        echo '<h2>' . esc_html__('Bureau et mot de passe des données', 'nyassobi-wp-plugin') . '</h2>';
+        $names = array_map(static fn (int $id): string => (string) (get_userdata($id)->user_login ?? ''), self::bureau_ids());
+        echo '<p>' . esc_html__('Seuls ces comptes WordPress voient les demandes d\'adhésion :', 'nyassobi-wp-plugin') . ' <strong>' . esc_html($names ? implode(', ', $names) : __('pas encore choisis (tous les administrateurs)', 'nyassobi-wp-plugin')) . '</strong></p>';
+        if (! $can_edit) {
+            echo '<p class="description">' . esc_html__('Seul un membre du bureau peut modifier ces réglages.', 'nyassobi-wp-plugin') . '</p>';
+            return;
+        }
+        $form = static function (string $what, string $inner, string $button): void {
+            printf(
+                '<form method="post" action="%s" style="margin:12px 0"><input type="hidden" name="action" value="nyassobi_vault"><input type="hidden" name="quoi" value="%s">%s%s <button class="button">%s</button></form>',
+                esc_url(admin_url('admin-post.php')),
+                esc_attr($what),
+                wp_nonce_field('nyassobi_vault_' . $what, '_wpnonce', true, false),
+                $inner, // phpcs:ignore WordPress.Security.EscapeOutput -- static markup.
+                esc_html($button)
+            );
+        };
+        $form('bureau', '<label>' . esc_html__('Identifiants WordPress du bureau, séparés par des virgules :', 'nyassobi-wp-plugin') . ' <input type="text" name="comptes" class="regular-text" value="' . esc_attr(implode(', ', $names)) . '"></label>', __('Enregistrer le bureau', 'nyassobi-wp-plugin'));
+
+        if (! Nyassobi_Vault::is_ready()) {
+            echo '<p>' . esc_html__('Le mot de passe du bureau chiffre les noms, dates de naissance et autorisations parentales : sans lui, personne (ni un autre administrateur, ni l\'hébergeur) ne peut les lire. Tant qu\'il n\'est pas choisi, le circuit d\'adhésion reste fermé. Notez-le en lieu sûr : s\'il est perdu, les demandes en cours deviennent illisibles.', 'nyassobi-wp-plugin') . '</p>';
+            $form('creer', '<input type="password" name="nouveau" placeholder="' . esc_attr__('Mot de passe (10 caractères ou plus)', 'nyassobi-wp-plugin') . '" autocomplete="new-password" required class="regular-text"> <input type="password" name="confirmation" placeholder="' . esc_attr__('Le même, une seconde fois', 'nyassobi-wp-plugin') . '" autocomplete="new-password" required class="regular-text">', __('Choisir le mot de passe du bureau', 'nyassobi-wp-plugin'));
+            return;
+        }
+        echo '<p>' . esc_html__('Le mot de passe du bureau est en place : les données d\'identité sont chiffrées.', 'nyassobi-wp-plugin') . '</p>';
+        $form('changer', '<input type="password" name="ancien" placeholder="' . esc_attr__('Mot de passe actuel', 'nyassobi-wp-plugin') . '" autocomplete="current-password" required class="regular-text"> <input type="password" name="nouveau" placeholder="' . esc_attr__('Nouveau mot de passe', 'nyassobi-wp-plugin') . '" autocomplete="new-password" required class="regular-text"> <input type="password" name="confirmation" placeholder="' . esc_attr__('Le même, une seconde fois', 'nyassobi-wp-plugin') . '" autocomplete="new-password" required class="regular-text">', __('Changer le mot de passe', 'nyassobi-wp-plugin'));
+        $form('perdu', '<label><input type="checkbox" name="confirme" value="1" required> ' . esc_html__('Mot de passe perdu : en choisir un nouveau. Les demandes en cours deviendront illisibles (il faudra les redemander).', 'nyassobi-wp-plugin') . '</label> <input type="password" name="nouveau" placeholder="' . esc_attr__('Nouveau mot de passe', 'nyassobi-wp-plugin') . '" autocomplete="new-password" required class="regular-text"> <input type="password" name="confirmation" placeholder="' . esc_attr__('Le même, une seconde fois', 'nyassobi-wp-plugin') . '" autocomplete="new-password" required class="regular-text">', __('Réinitialiser', 'nyassobi-wp-plugin'));
+    }
+
+    public function handle_vault_form(): void
+    {
+        $what = sanitize_key((string) ($_POST['quoi'] ?? ''));
+        $can_edit = ! self::bureau_ids() || in_array(get_current_user_id(), self::bureau_ids(), true);
+        if (! current_user_can(self::CAPABILITY) || ! $can_edit || ! check_admin_referer('nyassobi_vault_' . $what)) {
+            wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
+        }
+        $new = (string) wp_unslash($_POST['nouveau'] ?? '');
+        $confirm = (string) wp_unslash($_POST['confirmation'] ?? '');
+        $fail = static function (string $message): void {
+            wp_die(esc_html($message), '', ['back_link' => true]);
+        };
+        if (in_array($what, ['creer', 'changer', 'perdu'], true)) {
+            if (mb_strlen($new) < Nyassobi_Vault::MIN_PASSPHRASE) {
+                $fail(__('Le mot de passe doit faire au moins 10 caractères.', 'nyassobi-wp-plugin'));
+            }
+            if ($new !== $confirm) {
+                $fail(__('Les deux mots de passe ne correspondent pas.', 'nyassobi-wp-plugin'));
+            }
+        }
+        $message = '';
+        switch ($what) {
+            case 'bureau':
+                $ids = [];
+                foreach (array_filter(array_map('trim', explode(',', (string) wp_unslash($_POST['comptes'] ?? '')))) as $login) {
+                    $user = get_user_by('login', $login) ?: get_user_by('email', $login);
+                    if (! $user) {
+                        $fail(sprintf(__('Compte introuvable : %s', 'nyassobi-wp-plugin'), $login));
+                    }
+                    $ids[] = (int) $user->ID;
+                }
+                // Never lock oneself out by mistake.
+                if ($ids && ! in_array(get_current_user_id(), $ids, true)) {
+                    $fail(__('Ajoutez aussi votre propre compte, sinon vous perdriez l\'accès aux adhésions.', 'nyassobi-wp-plugin'));
+                }
+                update_option(self::BUREAU_OPTION, array_values(array_unique($ids)), false);
+                $message = __('Bureau enregistré.', 'nyassobi-wp-plugin');
+                break;
+            case 'creer':
+                if (Nyassobi_Vault::is_ready()) {
+                    $fail(__('Un mot de passe existe déjà.', 'nyassobi-wp-plugin'));
+                }
+                Nyassobi_Vault::setup($new);
+                $message = __('Mot de passe du bureau enregistré : les nouvelles demandes seront chiffrées.', 'nyassobi-wp-plugin');
+                break;
+            case 'changer':
+                if (! Nyassobi_Vault::change((string) wp_unslash($_POST['ancien'] ?? ''), $new)) {
+                    $fail(__('Mot de passe actuel incorrect.', 'nyassobi-wp-plugin'));
+                }
+                $message = __('Mot de passe du bureau changé.', 'nyassobi-wp-plugin');
+                break;
+            case 'perdu':
+                if (empty($_POST['confirme'])) {
+                    $fail(__('Cochez la case de confirmation.', 'nyassobi-wp-plugin'));
+                }
+                Nyassobi_Vault::setup($new);
+                $message = __('Nouveau mot de passe en place. Les demandes déjà reçues ne sont plus lisibles.', 'nyassobi-wp-plugin');
+                break;
+            default:
+                $fail(__('Action inconnue.', 'nyassobi-wp-plugin'));
+        }
+        set_transient('nyassobi_vault_notice_' . get_current_user_id(), $message, 60);
+        wp_safe_redirect(admin_url('edit.php?post_type=' . self::POST_TYPE . '&page=' . self::PAGE_SLUG));
         exit;
     }
 
@@ -1404,34 +1617,29 @@ final class Nyassobi_Membership
     {
         $id = $post->ID;
         $status = (string) get_post_meta($id, self::META_STATUS, true);
-        $birth_date = (string) get_post_meta($id, self::META_BIRTH_DATE, true);
-        $age = self::age_from_birth_date($birth_date);
+        $minor = '1' === get_post_meta($id, self::META_MINOR, true);
         $tally = self::tally((array) get_post_meta($id, self::META_VOTES, true));
         $rows = [
             __('Pseudo', 'nyassobi-wp-plugin') => get_post_meta($id, self::META_PSEUDO, true),
-            __('Prénom', 'nyassobi-wp-plugin') => get_post_meta($id, self::META_FIRST_NAME, true),
-            __('Nom', 'nyassobi-wp-plugin') => get_post_meta($id, self::META_LAST_NAME, true),
-            __('Date de naissance', 'nyassobi-wp-plugin') => $birth_date . (null !== $age ? sprintf(' (%d ans%s)', $age, $age < 18 ? ', mineur·e' : '') : ''),
             __('E-mail', 'nyassobi-wp-plugin') => get_post_meta($id, self::META_EMAIL, true),
+            __('Âge', 'nyassobi-wp-plugin') => $minor ? __('mineur·e (autorisation parentale jointe)', 'nyassobi-wp-plugin') : __('majeur·e', 'nyassobi-wp-plugin'),
             __('Tarif', 'nyassobi-wp-plugin') => '1' === get_post_meta($id, self::META_REDUCED_RATE, true) ? __('Réduit (15 €)', 'nyassobi-wp-plugin') : __('Normal (20 €)', 'nyassobi-wp-plugin'),
             __('Statut', 'nyassobi-wp-plugin') => $this->status_label($status),
             __('Votes', 'nyassobi-wp-plugin') => sprintf(__('%1$d pour, %2$d contre, %3$d abstention(s)', 'nyassobi-wp-plugin'), $tally['pour'], $tally['contre'], $tally['abstention']),
         ];
         echo '<table class="form-table" role="presentation"><tbody>';
+        // Name, first name, birth date and parental authorization are
+        // encrypted: they only show after the bureau passphrase.
+        printf(
+            '<tr><th scope="row">%s</th><td><p class="description" style="margin-top:0">%s</p>%s</td></tr>',
+            esc_html__('Identité', 'nyassobi-wp-plugin'),
+            esc_html($minor ? __('Nom, prénom, date de naissance et autorisation parentale sont chiffrés.', 'nyassobi-wp-plugin') : __('Nom, prénom et date de naissance sont chiffrés.', 'nyassobi-wp-plugin')),
+            self::passphrase_form('nyassobi_membership_reveal', 'nyassobi_membership_reveal_' . $id, __('Afficher', 'nyassobi-wp-plugin'), ['post' => $id]) // phpcs:ignore
+        );
         foreach ($rows as $label => $value) {
             printf('<tr><th scope="row">%s</th><td>%s</td></tr>', esc_html($label), esc_html((string) $value));
         }
         do_action('nyassobi_membership_metabox_rows', $id);
-        if (null !== $age && $age < 18) {
-            $file_url = wp_nonce_url(admin_url('admin-post.php?action=nyassobi_membership_file&post=' . $id), 'nyassobi_membership_file_' . $id);
-            printf(
-                '<tr><th scope="row">%s</th><td>%s</td></tr>',
-                esc_html__('Autorisation parentale', 'nyassobi-wp-plugin'),
-                null !== self::parental_path($id)
-                    ? sprintf('<a class="button" href="%s" target="_blank" rel="noopener">%s</a>', esc_url($file_url), esc_html__('Ouvrir le document à vérifier', 'nyassobi-wp-plugin'))
-                    : esc_html__('Document manquant', 'nyassobi-wp-plugin')
-            );
-        }
         echo '</tbody></table>';
 
         $action_url = static function (string $action) use ($id): string {
@@ -1469,7 +1677,7 @@ final class Nyassobi_Membership
         $post_id = isset($_GET['post']) ? (int) $_GET['post'] : 0;
         $action = isset($_GET['do']) ? sanitize_key((string) $_GET['do']) : '';
 
-        if (! current_user_can(self::CAPABILITY) || ! check_admin_referer('nyassobi_membership_' . $action . '_' . $post_id)) {
+        if (! current_user_can(self::CAP_ADHESIONS) || ! check_admin_referer('nyassobi_membership_' . $action . '_' . $post_id)) {
             wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
         }
         $post = get_post($post_id);
