@@ -241,3 +241,34 @@ Pour essayer tout le circuit sans rien envoyer, un WordPress de test tourne sur 
 
 Le mu-plugin `bac-a-sable/mu/bac-a-sable.php` intercepte Discord et tous les e-mails : il ne
 doit jamais être installé sur le vrai WordPress.
+
+### Pré-production
+
+Comme le bac à sable, mais en vrai : un serveur Discord de test, de vrais e-mails (vers des
+adresses autorisées seulement) et les environnements de test de HelloAsso et PayPal.
+
+```bash
+./scripts/preprod.sh                    # dépôt du plugin : WordPress de pré-production
+./scripts/deployer.sh --preprod         # dépôt du site : la copie du site branchée dessus
+```
+
+Tout passe par Tailscale, en HTTPS ; les conteneurs n'écoutent que sur la Pi. Une seule fois,
+sur la Pi :
+
+```bash
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8507
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:8506
+sudo tailscale funnel --bg --https=10000 --set-path=/wp-json/nyassobi/v1/discord http://127.0.0.1:8506/wp-json/nyassobi/v1/discord
+sudo tailscale funnel --bg --https=10000 --set-path=/wp-json/nyassobi/v1/helloasso http://127.0.0.1:8506/wp-json/nyassobi/v1/helloasso
+```
+
+- `https://<nom Tailscale de la Pi>` : la copie du site ; `:8443` : l'administration WordPress
+  (identifiants et mot de passe du bureau dans `~/nyassobi-preprod/IDENTIFIANTS.txt`).
+- Seules les deux adresses du port 10000 sont publiques : c'est celle de `/discord` qu'il faut
+  donner à Discord comme « Interactions Endpoint URL », et celle de `/helloasso` à HelloAsso
+  comme adresse de notification.
+- `~/nyassobi-preprod/.env` (sur la Pi, jamais dans Git) : compte d'envoi des e-mails
+  (`SMTP_UTILISATEUR`, `SMTP_MOT_DE_PASSE` ; pour Gmail, un « mot de passe d'application ») et
+  `DESTINATAIRES_AUTORISES` (par exemple `ton.adresse+*@gmail.com`). Tout autre destinataire est
+  bloqué et signalé dans l'administration. Relancer `./scripts/preprod.sh` après une modification.
+- Le CA de pré-production compte une personne : on peut voter seul (réglable).
