@@ -54,6 +54,11 @@ final class Nyassobi_Membership_Payment
         add_action('graphql_register_types', [$this, 'register_graphql']);
         add_action('rest_api_init', [$this, 'register_rest_routes']);
         add_action(Nyassobi_Membership::PURGE_HOOK, [$this, 'daily']);
+        add_action('admin_post_nyassobi_membership_export', [$this, 'export_register']);
+        add_action('restrict_manage_posts', [$this, 'export_button']);
+        add_filter('bulk_actions-edit-' . Nyassobi_Membership::POST_TYPE, [$this, 'bulk_actions']);
+        add_filter('handle_bulk_actions-edit-' . Nyassobi_Membership::POST_TYPE, [$this, 'handle_bulk_finalize'], 10, 3);
+        add_action('admin_notices', [$this, 'finalized_notice']);
     }
 
     private function membership(): Nyassobi_Membership
@@ -219,7 +224,7 @@ final class Nyassobi_Membership_Payment
                 sprintf(__('Nyassobi : cotisation reçue, demande n°%d', 'nyassobi-wp-plugin'), $post_id),
                 [
                     sprintf(__('La cotisation de la demande n°%1$d a été payée (%2$s).', 'nyassobi-wp-plugin'), $post_id, self::VIA_LABELS[$via] ?? $via),
-                    sprintf(__('À inscrire au registre des membres, puis à finaliser (ce qui efface ses données en ligne) ici. Sans finalisation, elles seront effacées automatiquement dans %d jours :', 'nyassobi-wp-plugin'), (int) $settings['paid_retention_days']),
+                    sprintf(__('À ajouter au registre des membres : dans WordPress, Adhésions > « Exporter pour le registre (Excel) », puis cocher la demande et choisir l\'action « Finaliser ». Sans finalisation, ses données seront effacées automatiquement dans %d jours :', 'nyassobi-wp-plugin'), (int) $settings['paid_retention_days']),
                     admin_url('post.php?post=' . $post_id . '&action=edit'),
                 ],
                 false
@@ -573,6 +578,131 @@ final class Nyassobi_Membership_Payment
     /* ------------------------------------------------------------------
      * Admin
      * ------------------------------------------------------------------ */
+
+    /** @return int[] Paid requests, oldest payment first. */
+    private function paid_ids(): array
+    {
+        $ids = get_posts(
+            [
+                'post_type' => Nyassobi_Membership::POST_TYPE,
+                'post_status' => 'any',
+                'fields' => 'ids',
+                'posts_per_page' => -1,
+                'meta_query' => [['key' => Nyassobi_Membership::META_STATUS, 'value' => Nyassobi_Membership::STATUS_PAID]],
+                'meta_key' => self::META_PAID_AT,
+                'orderby' => 'meta_value_num',
+                'order' => 'ASC',
+            ]
+        );
+
+        return array_map('intval', $ids);
+    }
+
+    public function export_button(string $post_type): void
+    {
+        if (Nyassobi_Membership::POST_TYPE !== $post_type || ! current_user_can(Nyassobi_Membership::CAPABILITY)) {
+            return;
+        }
+        $count = count($this->paid_ids());
+        printf(
+            '<a class="button button-primary" href="%s" style="margin-left:6px">%s</a>',
+            esc_url(wp_nonce_url(admin_url('admin-post.php?action=nyassobi_membership_export'), 'nyassobi_membership_export')),
+            esc_html(sprintf(_n('Exporter %d adhésion payée pour le registre (Excel)', 'Exporter %d adhésions payées pour le registre (Excel)', $count, 'nyassobi-wp-plugin'), $count))
+        );
+    }
+
+    /**
+     * The members register is kept offline (an Excel file on the
+     * president's computer). This file opens straight in Excel: UTF-8 with
+     * BOM, semicolons, French dates. Only what the privacy policy says the
+     * register keeps: no pseudonym, no email.
+     */
+    public function export_register(): void
+    {
+        if (! current_user_can(Nyassobi_Membership::CAPABILITY) || ! check_admin_referer('nyassobi_membership_export')) {
+            wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
+        }
+        $format_date = static function (string $iso): string {
+            $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $iso);
+            return $date ? $date->format('d/m/Y') : $iso;
+        };
+        $rows = [['Nom', 'Prénom', 'Date de naissance', 'Mineur', 'Date d\'adhésion', 'Saison', 'Cotisation (€)', 'Tarif', 'Payée par', 'N° de demande']];
+        foreach ($this->paid_ids() as $id) {
+            $birth = $this->meta($id, Nyassobi_Membership::META_BIRTH_DATE);
+            $age = Nyassobi_Membership::age_from_birth_date($birth);
+            $rows[] = [
+                $this->meta($id, Nyassobi_Membership::META_LAST_NAME),
+                $this->meta($id, Nyassobi_Membership::META_FIRST_NAME),
+                $format_date($birth),
+                null !== $age && $age < 18 ? 'oui' : 'non',
+                wp_date('d/m/Y', (int) $this->meta($id, self::META_PAID_AT)),
+                $this->season(),
+                (string) $this->fee_euros($id),
+                '1' === $this->meta($id, Nyassobi_Membership::META_REDUCED_RATE) ? 'réduit' : 'normal',
+                self::VIA_LABELS[$this->meta($id, self::META_PAID_VIA)] ?? '',
+                (string) $id,
+            ];
+        }
+
+        nocache_headers();
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="adhesions-a-inscrire-' . wp_date('Y-m-d') . '.csv"');
+        $out = fopen('php://output', 'w');
+        fwrite($out, "\xEF\xBB\xBF");
+        foreach ($rows as $row) {
+            // A cell starting with = + - @ would be run as a formula by Excel.
+            $row = array_map(static fn (string $cell): string => preg_match('/^[=+\-@]/', $cell) ? "'" . $cell : $cell, $row);
+            fputcsv($out, $row, ';', '"', '\\', "\r\n");
+        }
+        fclose($out);
+        exit;
+    }
+
+    /**
+     * @param array<string,string> $actions
+     *
+     * @return array<string,string>
+     */
+    public function bulk_actions(array $actions): array
+    {
+        unset($actions['edit']);
+        $actions['nyassobi_finaliser'] = __('Finaliser (inscrites au registre, effacer leurs données)', 'nyassobi-wp-plugin');
+
+        return $actions;
+    }
+
+    /**
+     * @param int[] $ids
+     */
+    public function handle_bulk_finalize(string $redirect, string $action, array $ids): string
+    {
+        if ('nyassobi_finaliser' !== $action || ! current_user_can(Nyassobi_Membership::CAPABILITY)) {
+            return $redirect;
+        }
+        $done = 0;
+        foreach ($ids as $id) {
+            // Only paid requests: the others are still waiting for a vote or a payment.
+            if (Nyassobi_Membership::STATUS_PAID === $this->meta((int) $id, Nyassobi_Membership::META_STATUS)) {
+                wp_delete_post((int) $id, true);
+                ++$done;
+            }
+        }
+
+        return add_query_arg(['nyassobi_finalisees' => $done, 'nyassobi_ignorees' => count($ids) - $done], $redirect);
+    }
+
+    public function finalized_notice(): void
+    {
+        if (! isset($_GET['nyassobi_finalisees'])) {
+            return;
+        }
+        $done = (int) $_GET['nyassobi_finalisees'];
+        $skipped = (int) ($_GET['nyassobi_ignorees'] ?? 0);
+        printf('<div class="notice notice-success is-dismissible"><p>%s%s</p></div>',
+            esc_html(sprintf(_n('%d adhésion finalisée : ses données sont effacées de WordPress.', '%d adhésions finalisées : leurs données sont effacées de WordPress.', $done, 'nyassobi-wp-plugin'), $done)),
+            $skipped ? esc_html(sprintf(_n(' %d demande ignorée (pas encore payée).', ' %d demandes ignorées (pas encore payées).', $skipped, 'nyassobi-wp-plugin'), $skipped)) : ''
+        );
+    }
 
     public function metabox_rows(int $post_id): void
     {

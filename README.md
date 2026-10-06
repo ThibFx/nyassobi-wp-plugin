@@ -146,6 +146,12 @@ paiement, et la demande est effacée automatiquement au bout de 30 jours (régla
 données ne restent jamais en ligne. Sans paiement, une relance part après 7 jours et la
 demande expire après 30 (réglables), avec effacement des données.
 
+Pour le registre des membres (tenu hors ligne dans un fichier Excel) : dans **Adhésions**, le
+bouton « Exporter … pour le registre (Excel) » télécharge les adhésions payées (nom, prénom,
+date de naissance, date d'adhésion, cotisation ; ni pseudo ni e-mail). Une fois les lignes
+copiées dans le registre, cocher les demandes et choisir l'action groupée « Finaliser » :
+leurs données sont effacées de WordPress.
+
 Rien sur la personne n'est envoyé à HelloAsso : le payeur (souvent un parent, pour un
 mineur) saisit lui-même ses coordonnées sur la page de paiement. Le lien avec la demande
 passe par un numéro interne.
