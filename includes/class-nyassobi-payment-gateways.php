@@ -120,7 +120,11 @@ final class Nyassobi_HelloAsso
      * URL is only valid for 15 minutes, which is why it is created at click
      * time and never written in an email.
      *
-     * @param array{amount_cents:int,item:string,first_name:string,last_name:string,email:string,return_url:string,back_url:string,error_url:string,metadata:array<string,mixed>} $checkout
+     * Nothing about the person is sent: the payer types their own details on
+     * HelloAsso (often a parent paying for a minor), and the link with the
+     * membership request goes through the metadata only.
+     *
+     * @param array{amount_cents:int,item:string,return_url:string,back_url:string,error_url:string,metadata:array<string,mixed>} $checkout
      *
      * @return array{id:string,url:string}|null
      */
@@ -134,19 +138,11 @@ final class Nyassobi_HelloAsso
             'errorUrl' => $checkout['error_url'],
             'returnUrl' => $checkout['return_url'],
             'containsDonation' => false,
-            // No date of birth: HelloAsso rejects minors' dates.
-            'payer' => ['firstName' => $checkout['first_name'], 'lastName' => $checkout['last_name'], 'email' => $checkout['email']],
             'metadata' => $checkout['metadata'],
         ];
         $path = '/organizations/' . rawurlencode($this->settings['helloasso_org_slug']) . '/checkout-intents';
         $result = $this->call('POST', $path, $body);
 
-        // HelloAsso refuses some names (digits, one letter...): the payer then
-        // types them on the payment page instead.
-        if (400 === $result['code']) {
-            unset($body['payer']['firstName'], $body['payer']['lastName']);
-            $result = $this->call('POST', $path, $body);
-        }
         if (empty($result['data']['id']) || empty($result['data']['redirectUrl'])) {
             error_log(sprintf('[Nyassobi] HelloAsso : checkout refusé (%d).', $result['code']));
             return null;

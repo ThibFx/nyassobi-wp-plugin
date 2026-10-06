@@ -210,6 +210,10 @@ function bac_avancer(int $demande, int $jours): void
     $accepte = (int) get_post_meta($demande, '_nyassobi_accepted_at', true);
     if ($accepte) {
         update_post_meta($demande, '_nyassobi_accepted_at', (string) ($accepte - $jours * DAY_IN_SECONDS));
+        $paye = (int) get_post_meta($demande, '_nyassobi_paid_at', true);
+        if ($paye) {
+            update_post_meta($demande, '_nyassobi_paid_at', (string) ($paye - $jours * DAY_IN_SECONDS));
+        }
         do_action(Nyassobi_Membership::PURGE_HOOK);
         set_transient(BAC_FLASH, sprintf('Demande n°%d : %d jours plus tard, tâche quotidienne lancée.', $demande, $jours), 60);
     }
@@ -345,7 +349,7 @@ function bac_afficher(): void
     $messages = array_reverse(get_option(BAC_MESSAGES, []), true);
     $mails = get_option(BAC_MAILS, []);
     $roles = get_option(BAC_ROLES, []);
-    $en_attente = get_posts(['post_type' => 'nyassobi_adhesion', 'post_status' => 'any', 'numberposts' => 20, 'meta_query' => [['key' => '_nyassobi_status', 'value' => 'accepted']]]);
+    $en_attente = get_posts(['post_type' => 'nyassobi_adhesion', 'post_status' => 'any', 'numberposts' => 20, 'meta_query' => [['key' => '_nyassobi_status', 'value' => ['accepted', 'paid'], 'compare' => 'IN']]]);
     $flash = get_transient(BAC_FLASH);
     delete_transient(BAC_FLASH);
     $membre = sanitize_key((string) ($_COOKIE['bac_membre'] ?? 'ca-1'));
@@ -450,18 +454,25 @@ function bac_afficher(): void
         </div>
       <?php endforeach; ?>
     </div>
-    <h2 style="margin-top:22px">Cotisations en attente</h2>
+    <h2 style="margin-top:22px">Demandes acceptées (avancer le temps)</h2>
     <div class="votant">
-      <?php if (! $en_attente) : ?><p class="vide" style="margin:0">Aucune demande acceptée en attente de paiement.</p><?php endif; ?>
+      <?php if (! $en_attente) : ?><p class="vide" style="margin:0">Aucune demande acceptée pour l'instant.</p><?php endif; ?>
       <?php foreach ($en_attente as $demande) :
-          $jours = (int) floor((time() - (int) get_post_meta($demande->ID, '_nyassobi_accepted_at', true)) / DAY_IN_SECONDS);
+          $payee = 'paid' === get_post_meta($demande->ID, '_nyassobi_status', true);
+          $depuis = (int) get_post_meta($demande->ID, $payee ? '_nyassobi_paid_at' : '_nyassobi_accepted_at', true);
+          $jours = (int) floor((time() - $depuis) / DAY_IN_SECONDS);
           ?>
         <form method="post" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0">
           <input type="hidden" name="_wpnonce" value="<?php echo esc_attr($nonce); ?>">
           <input type="hidden" name="demande" value="<?php echo esc_attr((string) $demande->ID); ?>">
-          <span><b>n°<?php echo esc_html((string) $demande->ID); ?></b> (<?php echo esc_html((string) get_post_meta($demande->ID, '_nyassobi_pseudo', true)); ?>), acceptée il y a <?php echo esc_html((string) $jours); ?> j</span>
+          <span><b>n°<?php echo esc_html((string) $demande->ID); ?></b> (<?php echo esc_html((string) get_post_meta($demande->ID, '_nyassobi_pseudo', true)); ?>), <?php echo $payee ? 'payée' : 'acceptée'; ?> il y a <?php echo esc_html((string) $jours); ?> j</span>
+          <?php if ($payee) : ?>
+          <button type="submit" name="avancer" value="15" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer">+15 jours (rappel au bureau)</button>
+          <button type="submit" name="avancer" value="30" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer">+30 jours (effacement)</button>
+          <?php else : ?>
           <button type="submit" name="avancer" value="7" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer">+7 jours (relance)</button>
           <button type="submit" name="avancer" value="30" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer">+30 jours (expiration)</button>
+          <?php endif; ?>
         </form>
       <?php endforeach; ?>
     </div>

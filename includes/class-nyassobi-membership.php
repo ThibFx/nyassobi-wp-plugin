@@ -318,6 +318,18 @@ final class Nyassobi_Membership
                 'description' => __('Sans paiement, la demande expire et ses données sont effacées. 30 par défaut.', 'nyassobi-wp-plugin'),
                 'type' => 'number',
             ],
+            'finalize_reminder_days' => [
+                'section' => 'paiement',
+                'label' => __('Rappel au bureau après paiement (jours)', 'nyassobi-wp-plugin'),
+                'description' => __('Si une adhésion payée n\'est pas encore finalisée, le bureau reçoit un rappel. 15 par défaut.', 'nyassobi-wp-plugin'),
+                'type' => 'number',
+            ],
+            'paid_retention_days' => [
+                'section' => 'paiement',
+                'label' => __('Effacement après paiement (jours)', 'nyassobi-wp-plugin'),
+                'description' => __('Une adhésion payée est effacée de WordPress au bout de ce délai, même sans finalisation : les données ne restent pas en ligne. 30 par défaut.', 'nyassobi-wp-plugin'),
+                'type' => 'number',
+            ],
             'discord_guild_id' => [
                 'section' => 'role',
                 'label' => __('ID du serveur Discord', 'nyassobi-wp-plugin'),
@@ -358,7 +370,7 @@ final class Nyassobi_Membership
     {
         $stored = get_option(self::OPTION_NAME, []);
         $settings = is_array($stored) ? array_map('strval', $stored) : [];
-        $defaults = ['board_size' => 6, 'fee_normal' => 20, 'fee_reduced' => 15, 'reminder_days' => 7, 'expiry_days' => 30];
+        $defaults = ['board_size' => 6, 'fee_normal' => 20, 'fee_reduced' => 15, 'reminder_days' => 7, 'expiry_days' => 30, 'finalize_reminder_days' => 15, 'paid_retention_days' => 30];
         foreach ($defaults as $key => $default) {
             $settings[$key] = (string) (max(0, (int) ($settings[$key] ?? 0)) ?: $default);
         }

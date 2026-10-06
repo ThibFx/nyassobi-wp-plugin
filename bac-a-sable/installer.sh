@@ -63,6 +63,8 @@ update_option("nyassobi_membership", [
     "paypal_sandbox" => "1",
     "reminder_days" => "7",
     "expiry_days" => "30",
+    "finalize_reminder_days" => "15",
+    "paid_retention_days" => "30",
     "discord_guild_id" => "3",
     "discord_member_role_id" => "5",
     "discord_invite_url" => "https://discord.gg/exemple-bac-a-sable",

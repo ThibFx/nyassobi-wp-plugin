@@ -141,8 +141,14 @@ lien HelloAsso ne reste valable que 15 minutes, il ne peut donc pas partir par e
 Au paiement : la demande passe « Cotisation payée », la personne reçoit l'e-mail de
 bienvenue, le message du CA affiche « cotisation reçue », et le bureau est prévenu (sans
 donnée personnelle) pour l'inscrire au registre puis **finaliser**, ce qui efface ses
-données de WordPress. Sans paiement, une relance part après 7 jours et la demande expire
-après 30 (réglables), avec effacement des données.
+données de WordPress. Si personne ne finalise, le bureau reçoit un rappel 15 jours après le
+paiement, et la demande est effacée automatiquement au bout de 30 jours (réglables) : les
+données ne restent jamais en ligne. Sans paiement, une relance part après 7 jours et la
+demande expire après 30 (réglables), avec effacement des données.
+
+Rien sur la personne n'est envoyé à HelloAsso : le payeur (souvent un parent, pour un
+mineur) saisit lui-même ses coordonnées sur la page de paiement. Le lien avec la demande
+passe par un numéro interne.
 
 ### Expéditeur des e-mails et spam
 

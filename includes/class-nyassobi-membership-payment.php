@@ -28,6 +28,7 @@ final class Nyassobi_Membership_Payment
     private const META_REMINDED = '_nyassobi_reminded';
     private const META_PAID_AT = '_nyassobi_paid_at';
     private const META_PAID_VIA = '_nyassobi_paid_via';
+    private const META_FINALIZE_REMINDED = '_nyassobi_finalize_reminded';
     private const META_HELLOASSO_INTENTS = '_nyassobi_helloasso_intents';
     private const META_PAYPAL_ORDERS = '_nyassobi_paypal_orders';
 
@@ -218,7 +219,7 @@ final class Nyassobi_Membership_Payment
                 sprintf(__('Nyassobi : cotisation reçue, demande n°%d', 'nyassobi-wp-plugin'), $post_id),
                 [
                     sprintf(__('La cotisation de la demande n°%1$d a été payée (%2$s).', 'nyassobi-wp-plugin'), $post_id, self::VIA_LABELS[$via] ?? $via),
-                    __('À inscrire au registre des membres, puis à finaliser (ce qui efface ses données en ligne) ici :', 'nyassobi-wp-plugin'),
+                    sprintf(__('À inscrire au registre des membres, puis à finaliser (ce qui efface ses données en ligne) ici. Sans finalisation, elles seront effacées automatiquement dans %d jours :', 'nyassobi-wp-plugin'), (int) $settings['paid_retention_days']),
                     admin_url('post.php?post=' . $post_id . '&action=edit'),
                 ],
                 false
@@ -260,6 +261,56 @@ final class Nyassobi_Membership_Payment
      * ------------------------------------------------------------------ */
 
     public function daily(): void
+    {
+        $this->expire_unpaid();
+        $this->expire_paid();
+    }
+
+    /**
+     * A paid membership waits for the bureau to copy it into the offline
+     * register and click "Finaliser". If that never happens, the data must
+     * not stay online forever: reminder first, then erasure. Nothing changes
+     * for the member, who already got their welcome email.
+     */
+    private function expire_paid(): void
+    {
+        $settings = $this->settings();
+        $ids = get_posts(
+            [
+                'post_type' => Nyassobi_Membership::POST_TYPE,
+                'post_status' => 'any',
+                'fields' => 'ids',
+                'posts_per_page' => 200,
+                'meta_query' => [['key' => Nyassobi_Membership::META_STATUS, 'value' => Nyassobi_Membership::STATUS_PAID]],
+            ]
+        );
+        $membership = $this->membership();
+        $bureau = is_email($settings['bureau_email'] ?? '') ? $settings['bureau_email'] : '';
+
+        foreach ($ids as $id) {
+            $id = (int) $id;
+            $days = (time() - (int) $this->meta($id, self::META_PAID_AT)) / DAY_IN_SECONDS;
+
+            if ($days >= (int) $settings['paid_retention_days']) {
+                if ('' !== $bureau) {
+                    $membership->send_mail($bureau, sprintf(__('Nyassobi : demande n°%d effacée sans finalisation', 'nyassobi-wp-plugin'), $id), [
+                        sprintf(__('La demande n°%1$d, payée il y a %2$d jours, n\'avait pas été finalisée : ses données viennent d\'être effacées de WordPress, comme le prévoit notre politique de confidentialité.', 'nyassobi-wp-plugin'), $id, (int) $days),
+                        __('Si la personne n\'a pas encore été inscrite au registre des membres, il faudra lui redemander ses informations (elle est bien membre : sa cotisation est réglée).', 'nyassobi-wp-plugin'),
+                    ], false);
+                }
+                wp_delete_post($id, true);
+            } elseif ($days >= (int) $settings['finalize_reminder_days'] && '' === $this->meta($id, self::META_FINALIZE_REMINDED) && '' !== $bureau) {
+                $membership->send_mail($bureau, sprintf(__('Nyassobi : rappel, demande n°%d à finaliser', 'nyassobi-wp-plugin'), $id), [
+                    sprintf(__('La demande n°%1$d est payée depuis %2$d jours mais n\'est pas encore finalisée.', 'nyassobi-wp-plugin'), $id, (int) $days),
+                    sprintf(__('Pensez à l\'inscrire au registre des membres puis à cliquer sur « Finaliser » : sans cela, ses données seront effacées automatiquement dans %d jours.', 'nyassobi-wp-plugin'), max(1, (int) ceil((int) $settings['paid_retention_days'] - $days))),
+                    admin_url('post.php?post=' . $id . '&action=edit'),
+                ], false);
+                update_post_meta($id, self::META_FINALIZE_REMINDED, (string) time());
+            }
+        }
+    }
+
+    private function expire_unpaid(): void
     {
         $settings = $this->settings();
         $ids = get_posts(
@@ -437,9 +488,6 @@ final class Nyassobi_Membership_Payment
             $checkout = $this->helloasso()->create_checkout([
                 'amount_cents' => $cents,
                 'item' => $item,
-                'first_name' => $this->meta($post_id, Nyassobi_Membership::META_FIRST_NAME),
-                'last_name' => $this->meta($post_id, Nyassobi_Membership::META_LAST_NAME),
-                'email' => $this->meta($post_id, Nyassobi_Membership::META_EMAIL),
                 'return_url' => add_query_arg('jeton', $token, rest_url(Nyassobi_Membership::REST_NAMESPACE . '/retour/helloasso')),
                 'back_url' => $back,
                 'error_url' => $this->page_url($token, 'erreur'),
@@ -537,6 +585,7 @@ final class Nyassobi_Membership_Payment
         $paid_at = (int) $this->meta($post_id, self::META_PAID_AT);
         if ($paid_at) {
             $rows[__('Payée le', 'nyassobi-wp-plugin')] = wp_date('j F Y à H:i', $paid_at) . ' · ' . (self::VIA_LABELS[$this->meta($post_id, self::META_PAID_VIA)] ?? '');
+            $rows[__('Effacement automatique', 'nyassobi-wp-plugin')] = wp_date('j F Y', $paid_at + (int) $this->settings()['paid_retention_days'] * DAY_IN_SECONDS) . ' ' . __('(sauf finalisation avant)', 'nyassobi-wp-plugin');
         } elseif ($accepted = (int) $this->meta($post_id, self::META_ACCEPTED_AT)) {
             $rows[__('Acceptée le', 'nyassobi-wp-plugin')] = wp_date('j F Y', $accepted) . ('' !== $this->meta($post_id, self::META_REMINDED) ? ' · ' . __('relance envoyée', 'nyassobi-wp-plugin') : '');
         }
