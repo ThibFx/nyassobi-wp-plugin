@@ -299,6 +299,7 @@ function bac_reinitialiser(): void
     update_option(BAC_MAILS, [], false);
     update_option(BAC_PAIEMENTS, [], false);
     update_option(BAC_ROLES, [], false);
+    delete_option('nyassobi_renewal_reminders_sent');
     set_transient(BAC_FLASH, 'Bac à sable remis à zéro.', 60);
 }
 
@@ -316,6 +317,12 @@ add_action('template_redirect', static function (): void {
         check_admin_referer('bac_a_sable');
         if (isset($_POST['reinitialiser'])) {
             bac_reinitialiser();
+        } elseif (isset($_POST['fin_de_saison'])) {
+            Nyassobi_Membership_Payment::instance()->send_renewal_reminders(true);
+            set_transient(BAC_FLASH, 'Date du rappel simulée : annonce Discord postée et bureau prévenu par e-mail.', 60);
+        } elseif (isset($_POST['adresses'])) {
+            $n = Nyassobi_Membership_Payment::instance()->send_renewal_to(wp_unslash((string) $_POST['adresses']));
+            set_transient(BAC_FLASH, sprintf('Rappel envoyé à %d adresse(s), rien n\'a été enregistré.', $n), 60);
         } elseif (isset($_POST['avancer'])) {
             bac_avancer((int) $_POST['demande'], (int) $_POST['avancer']);
         } else {
@@ -432,11 +439,14 @@ function bac_afficher(): void
           <div class="avatar">N</div>
           <div>
             <div class="auteur">Nyassobi Adhésions <small><?php echo esc_html((string) $message['date']); ?></small></div>
+            <?php if (! empty($message['body']['content'])) : ?><div style="margin-top:6px"><?php echo esc_html((string) $message['body']['content']); ?></div><?php endif; ?>
+            <?php if ($embed) : ?>
             <div class="embed" style="border-color: <?php echo esc_attr($couleur); ?>">
               <b class="titre"><?php echo esc_html((string) ($embed['title'] ?? '')); ?></b>
               <div><?php echo bac_markdown((string) ($embed['description'] ?? '')); // phpcs:ignore ?></div>
               <?php if (! empty($embed['footer']['text'])) : ?><div class="pied"><?php echo esc_html((string) $embed['footer']['text']); ?></div><?php endif; ?>
             </div>
+            <?php endif; ?>
             <?php foreach ((array) ($message['body']['components'] ?? []) as $rangee) : ?>
               <div class="boutons">
                 <?php foreach ((array) ($rangee['components'] ?? []) as $bouton) : ?>
@@ -476,6 +486,17 @@ function bac_afficher(): void
         </form>
       <?php endforeach; ?>
     </div>
+    <h2 style="margin-top:22px">Fin de saison</h2>
+    <form method="post" class="votant">
+      <input type="hidden" name="_wpnonce" value="<?php echo esc_attr($nonce); ?>">
+      <button type="submit" name="fin_de_saison" value="1" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer">Simuler la date du rappel (15 août)</button>
+    </form>
+    <form method="post" class="votant">
+      <input type="hidden" name="_wpnonce" value="<?php echo esc_attr($nonce); ?>">
+      <label for="adresses" style="display:block;margin-bottom:6px">Colonne « E-mail » copiée du registre Excel (comme sur la page « Rappel de fin de saison » de WordPress) :</label>
+      <textarea id="adresses" name="adresses" rows="4" style="width:100%;font:inherit;border-radius:8px;padding:8px" placeholder="E-mail&#10;camille@exemple.test&#10;lou@exemple.test"></textarea>
+      <button type="submit" style="border:0;border-radius:8px;padding:6px 10px;cursor:pointer;margin-top:6px">Envoyer le rappel</button>
+    </form>
     <h2 style="margin-top:22px">Rôles « Adhérent » donnés sur Discord</h2>
     <div class="votant">
       <?php if (! $roles) : ?><p class="vide" style="margin:0">Aucun pour l'instant. Astuce : un pseudo Discord contenant « absent » simule quelqu'un qui n'est pas sur le serveur.</p><?php endif; ?>

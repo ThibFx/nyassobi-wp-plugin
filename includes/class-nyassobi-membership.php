@@ -330,6 +330,18 @@ final class Nyassobi_Membership
                 'description' => __('Une adhésion payée est effacée de WordPress au bout de ce délai, même sans finalisation : les données ne restent pas en ligne. 30 par défaut.', 'nyassobi-wp-plugin'),
                 'type' => 'number',
             ],
+            'renewal_reminder_date' => [
+                'section' => 'paiement',
+                'label' => __('Rappel de renouvellement (JJ/MM)', 'nyassobi-wp-plugin'),
+                'description' => __('Ce jour-là, le bureau est invité à envoyer le rappel de renouvellement (adresses tirées du registre, rien n\'est gardé en ligne). 15/08 par défaut, avant le 31 août.', 'nyassobi-wp-plugin'),
+                'type' => 'text',
+            ],
+            'renewal_channel_id' => [
+                'section' => 'role',
+                'label' => __('Salon de l\'annonce de renouvellement', 'nyassobi-wp-plugin'),
+                'description' => __('Facultatif : le jour du rappel, le bot y mentionne le rôle « Adhérent » pour annoncer la nouvelle saison. Aucune donnée personnelle.', 'nyassobi-wp-plugin'),
+                'type' => 'id',
+            ],
             'discord_guild_id' => [
                 'section' => 'role',
                 'label' => __('ID du serveur Discord', 'nyassobi-wp-plugin'),
@@ -375,6 +387,9 @@ final class Nyassobi_Membership
             $settings[$key] = (string) (max(0, (int) ($settings[$key] ?? 0)) ?: $default);
         }
         // The test environment points the links to its own copy of the site.
+        $settings['renewal_reminder_date'] = preg_match('#^(\d{1,2})/(\d{1,2})$#', trim($settings['renewal_reminder_date'] ?? ''), $d) && checkdate((int) $d[2], (int) $d[1], 2000) && (int) $d[2] <= 8
+            ? sprintf('%02d/%02d', (int) $d[1], (int) $d[2])
+            : '15/08';
         $settings['site_url'] = (string) apply_filters('nyassobi_membership_site_url', untrailingslashit($settings['site_url'] ?? '') ?: home_url());
 
         return $settings;
@@ -477,6 +492,7 @@ final class Nyassobi_Membership
                 submit_button();
                 ?>
             </form>
+            <?php do_action('nyassobi_membership_settings_after'); ?>
         </div>
         <?php
     }
@@ -727,6 +743,7 @@ final class Nyassobi_Membership
         if ('' !== $discord_username) {
             update_post_meta($post_id, self::META_DISCORD_USERNAME, $discord_username);
         }
+
 
         if (is_array($parental) && ! $this->store_parental_file($post_id, $parental)) {
             wp_delete_post($post_id, true);

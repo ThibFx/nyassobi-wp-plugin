@@ -148,9 +148,15 @@ demande expire après 30 (réglables), avec effacement des données.
 
 Pour le registre des membres (tenu hors ligne dans un fichier Excel) : dans **Adhésions**, le
 bouton « Exporter … pour le registre (Excel) » télécharge les adhésions payées (nom, prénom,
-date de naissance, date d'adhésion, cotisation ; ni pseudo ni e-mail). Une fois les lignes
+date de naissance, e-mail, date d'adhésion, cotisation ; jamais le pseudo). Une fois les lignes
 copiées dans le registre, cocher les demandes et choisir l'action groupée « Finaliser » :
 leurs données sont effacées de WordPress.
+
+**Fin de saison** : toutes les adhésions se terminent le 31 août. À la date réglée (15 août
+par défaut), le bot annonce la nouvelle saison au rôle « Adhérent » dans le salon choisi, et le
+bureau reçoit un e-mail l'invitant à ouvrir **Adhésions > Rappel de fin de saison** : il y colle
+la colonne « E-mail » du registre, chaque adresse reçoit un rappel individuel, et rien n'est
+enregistré dans WordPress. Un renouvellement est une nouvelle demande, votée par le CA.
 
 Rien sur la personne n'est envoyé à HelloAsso : le payeur (souvent un parent, pour un
 mineur) saisit lui-même ses coordonnées sur la page de paiement. Le lien avec la demande

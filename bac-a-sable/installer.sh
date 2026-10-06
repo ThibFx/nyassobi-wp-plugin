@@ -65,6 +65,8 @@ update_option("nyassobi_membership", [
     "expiry_days" => "30",
     "finalize_reminder_days" => "15",
     "paid_retention_days" => "30",
+    "renewal_reminder_date" => "15/08",
+    "renewal_channel_id" => "7",
     "discord_guild_id" => "3",
     "discord_member_role_id" => "5",
     "discord_invite_url" => "https://discord.gg/exemple-bac-a-sable",

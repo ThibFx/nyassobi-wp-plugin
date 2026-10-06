@@ -34,6 +34,9 @@ final class Nyassobi_Membership_Payment
     private const META_HELLOASSO_INTENTS = '_nyassobi_helloasso_intents';
     private const META_PAYPAL_ORDERS = '_nyassobi_paypal_orders';
 
+    /** Seasons whose end-of-season announcement already went out. */
+    private const RENEWALS_SENT_OPTION = 'nyassobi_renewal_reminders_sent';
+
     private const VIA_LABELS = ['helloasso' => 'carte bancaire (HelloAsso)', 'paypal' => 'PayPal', 'manuel' => 'saisie du bureau'];
 
     /** @var self|null */
@@ -61,6 +64,8 @@ final class Nyassobi_Membership_Payment
         add_filter('bulk_actions-edit-' . Nyassobi_Membership::POST_TYPE, [$this, 'bulk_actions']);
         add_filter('handle_bulk_actions-edit-' . Nyassobi_Membership::POST_TYPE, [$this, 'handle_bulk_finalize'], 10, 3);
         add_action('admin_notices', [$this, 'finalized_notice']);
+        add_action('admin_menu', [$this, 'register_renewal_page']);
+        add_action('admin_post_nyassobi_renewal_send', [$this, 'send_renewal_from_register']);
     }
 
     private function membership(): Nyassobi_Membership
@@ -281,6 +286,135 @@ final class Nyassobi_Membership_Payment
     {
         $this->expire_unpaid();
         $this->expire_paid();
+        $this->send_renewal_reminders();
+    }
+
+    /* ------------------------------------------------------------------
+     * End-of-season renewal reminder
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Everyone's membership ends on 31 August. Addresses are not kept online:
+     * they live in the president's register. On the reminder date, the bot
+     * announces the new season to the "Adhérent" role on Discord, and the
+     * bureau is asked to paste the register's email column on a page that
+     * sends the reminder and stores nothing.
+     */
+    public function send_renewal_reminders(bool $force = false): bool
+    {
+        $settings = $this->settings();
+        $season = $this->season();
+        $end_year = (int) substr($season, 5, 4);
+        [$day, $month] = array_map('intval', explode('/', $settings['renewal_reminder_date']));
+        $due = (new \DateTimeImmutable('now', wp_timezone()))->format('Y-m-d') >= sprintf('%04d-%02d-%02d', $end_year, $month, $day);
+        $sent = (array) get_option(self::RENEWALS_SENT_OPTION, []);
+        if (! $force && (! $due || in_array($season, $sent, true))) {
+            return false;
+        }
+
+        $next = $end_year . '-' . ($end_year + 1);
+        $membership = $this->membership();
+        $channel = $settings['renewal_channel_id'] ?? '';
+        $role = $settings['discord_member_role_id'] ?? '';
+        if ('' !== $channel && '' !== $role) {
+            $membership->discord_request('POST', '/channels/' . rawurlencode($channel) . '/messages', [
+                'content' => sprintf("<@&%s> Les adhésions %s sont ouvertes ! Vos adhésions %s se terminent le 31 août : pour continuer avec nous, refaites une demande sur %s/adhesion 🐾", $role, $next, $season, $settings['site_url']),
+                'allowed_mentions' => ['roles' => [$role]],
+            ]);
+        }
+        if (is_email($settings['bureau_email'] ?? '')) {
+            $membership->send_mail($settings['bureau_email'], sprintf(__('Nyassobi : c\'est le moment du rappel de renouvellement %s', 'nyassobi-wp-plugin'), $season), [
+                sprintf(__('Les adhésions %s se terminent le 31 août.', 'nyassobi-wp-plugin'), $season),
+                __('Pour prévenir les adhérents, copiez la colonne « E-mail » du registre et collez-la ici : chacun reçoit un rappel individuel, et aucune adresse n\'est gardée en ligne.', 'nyassobi-wp-plugin'),
+                admin_url('edit.php?post_type=' . Nyassobi_Membership::POST_TYPE . '&page=nyassobi-renouvellement'),
+            ], false);
+        }
+
+        $sent[] = $season;
+        update_option(self::RENEWALS_SENT_OPTION, array_slice(array_values(array_unique($sent)), -5), false);
+
+        return true;
+    }
+
+    public function register_renewal_page(): void
+    {
+        add_submenu_page(
+            'edit.php?post_type=' . Nyassobi_Membership::POST_TYPE,
+            __('Rappel de renouvellement', 'nyassobi-wp-plugin'),
+            __('Rappel de fin de saison', 'nyassobi-wp-plugin'),
+            Nyassobi_Membership::CAPABILITY,
+            'nyassobi-renouvellement',
+            [$this, 'render_renewal_page']
+        );
+    }
+
+    public function render_renewal_page(): void
+    {
+        if (! current_user_can(Nyassobi_Membership::CAPABILITY)) {
+            return;
+        }
+        $season = $this->season();
+        $end_year = (int) substr($season, 5, 4);
+        $sent = isset($_GET['nyassobi_envoyes']) ? (int) $_GET['nyassobi_envoyes'] : null;
+        ?>
+        <div class="wrap">
+            <h1><?php esc_html_e('Rappel de fin de saison', 'nyassobi-wp-plugin'); ?></h1>
+            <?php if (null !== $sent) : ?>
+                <div class="notice notice-success"><p><?php echo esc_html(sprintf(_n('%d rappel envoyé. Aucune adresse n\'a été enregistrée.', '%d rappels envoyés. Aucune adresse n\'a été enregistrée.', $sent, 'nyassobi-wp-plugin'), $sent)); ?></p></div>
+            <?php endif; ?>
+            <p><?php echo esc_html(sprintf(__('Les adhésions %1$s se terminent le 31 août %2$d. Copiez la colonne « E-mail » du registre des membres (Excel) et collez-la ci-dessous : chaque adresse reçoit un rappel individuel l\'invitant à refaire une demande pour %3$s.', 'nyassobi-wp-plugin'), $season, $end_year, $end_year . '-' . ($end_year + 1))); ?></p>
+            <p><?php esc_html_e('Les adresses ne sont pas enregistrées dans WordPress : elles servent à l\'envoi, puis sont oubliées.', 'nyassobi-wp-plugin'); ?></p>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="nyassobi_renewal_send">
+                <?php wp_nonce_field('nyassobi_renewal_send'); ?>
+                <textarea name="adresses" rows="12" class="large-text code" placeholder="prenom.nom@exemple.fr&#10;autre@exemple.fr"></textarea>
+                <?php submit_button(__('Envoyer le rappel', 'nyassobi-wp-plugin'), 'primary', 'submit', true, ['onclick' => "return confirm('" . esc_js(__('Envoyer le rappel de renouvellement à ces adresses ?', 'nyassobi-wp-plugin')) . "');"]); ?>
+            </form>
+        </div>
+        <?php
+    }
+
+    public function send_renewal_from_register(): void
+    {
+        if (! current_user_can(Nyassobi_Membership::CAPABILITY) || ! check_admin_referer('nyassobi_renewal_send')) {
+            wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
+        }
+        $this->send_renewal_to((string) wp_unslash($_POST['adresses'] ?? ''), true);
+    }
+
+    /**
+     * Sends the reminder to every address found in the pasted text, then
+     * forgets them. Whatever Excel puts around the column (header, blank
+     * lines, separators): only what looks like an address is kept, once.
+     */
+    public function send_renewal_to(string $pasted, bool $redirect = false): int
+    {
+        preg_match_all('/[^\s;,<>"\']+@[^\s;,<>"\']+\.[A-Za-z]{2,}/', $pasted, $found);
+        $addresses = array_values(array_unique(array_filter(array_map(static fn ($a) => strtolower(sanitize_email($a)), $found[0]), 'is_email')));
+
+        $settings = $this->settings();
+        $season = $this->season();
+        $end_year = (int) substr($season, 5, 4);
+        $membership = $this->membership();
+        foreach ($addresses as $address) {
+            $membership->send_mail($address, sprintf(__('Nyassobi : ton adhésion %s se termine le 31 août', 'nyassobi-wp-plugin'), $season), [
+                __('Bonjour,', 'nyassobi-wp-plugin'),
+                '',
+                sprintf(__('Ton adhésion à Nyassobi pour la saison %s se termine le 31 août.', 'nyassobi-wp-plugin'), $season),
+                sprintf(__('Pour continuer l\'aventure en %s, refais une demande sur notre site : comme chaque adhésion, elle sera validée par le conseil d\'administration, puis tu recevras le lien pour régler ta cotisation.', 'nyassobi-wp-plugin'), $end_year . '-' . ($end_year + 1)),
+                $settings['site_url'] . '/adhesion',
+                '',
+                __('Merci pour cette saison avec nous,', 'nyassobi-wp-plugin'),
+                __('L\'équipe Nyassobi', 'nyassobi-wp-plugin'),
+            ]);
+        }
+
+        if ($redirect) {
+            wp_safe_redirect(add_query_arg('nyassobi_envoyes', count($addresses), admin_url('edit.php?post_type=' . Nyassobi_Membership::POST_TYPE . '&page=nyassobi-renouvellement')));
+            exit;
+        }
+
+        return count($addresses);
     }
 
     /**
@@ -626,8 +760,8 @@ final class Nyassobi_Membership_Payment
     /**
      * The members register is kept offline (an Excel file on the
      * president's computer). This file opens straight in Excel: UTF-8 with
-     * BOM, semicolons, French dates. Only what the privacy policy says the
-     * register keeps: no pseudonym, no email.
+     * BOM, semicolons, French dates. Identity and email (for the
+     * end-of-season reminder); never the pseudonym.
      */
     public function export_register(): void
     {
@@ -638,7 +772,7 @@ final class Nyassobi_Membership_Payment
             $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $iso);
             return $date ? $date->format('d/m/Y') : $iso;
         };
-        $rows = [['Nom', 'Prénom', 'Date de naissance', 'Mineur', 'Date d\'adhésion', 'Saison', 'Cotisation (€)', 'Tarif', 'Payée par', 'N° de demande']];
+        $rows = [['Nom', 'Prénom', 'Date de naissance', 'E-mail', 'Mineur', 'Date d\'adhésion', 'Saison', 'Cotisation (€)', 'Tarif', 'Payée par', 'N° de demande']];
         foreach ($this->paid_ids() as $id) {
             $birth = $this->meta($id, Nyassobi_Membership::META_BIRTH_DATE);
             $age = Nyassobi_Membership::age_from_birth_date($birth);
@@ -646,6 +780,8 @@ final class Nyassobi_Membership_Payment
                 $this->meta($id, Nyassobi_Membership::META_LAST_NAME),
                 $this->meta($id, Nyassobi_Membership::META_FIRST_NAME),
                 $format_date($birth),
+                // Kept in the register for the end-of-season renewal reminder.
+                $this->meta($id, Nyassobi_Membership::META_EMAIL),
                 null !== $age && $age < 18 ? 'oui' : 'non',
                 wp_date('d/m/Y', (int) $this->meta($id, self::META_PAID_AT)),
                 $this->season($id),
@@ -705,6 +841,7 @@ final class Nyassobi_Membership_Payment
 
     public function finalized_notice(): void
     {
+
         if (! isset($_GET['nyassobi_finalisees'])) {
             return;
         }
