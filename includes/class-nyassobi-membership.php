@@ -795,6 +795,8 @@ final class Nyassobi_Membership
                 __('Nous avons bien reçu ta demande d\'adhésion à Nyassobi, merci !', 'nyassobi-wp-plugin'),
                 __('Le conseil d\'administration va l\'étudier. Tu recevras un e-mail dès qu\'il aura voté, avec la marche à suivre pour régler ta cotisation.', 'nyassobi-wp-plugin'),
                 '',
+                __('Pour que ce prochain e-mail ne finisse pas dans tes spams, ajoute notre adresse à tes contacts. Si celui-ci y était, signale-le comme « non spam ».', 'nyassobi-wp-plugin'),
+                '',
                 __('À très vite,', 'nyassobi-wp-plugin'),
                 __('L\'équipe Nyassobi', 'nyassobi-wp-plugin'),
             ]
@@ -802,7 +804,7 @@ final class Nyassobi_Membership
 
         return [
             'success' => true,
-            'message' => __('Le conseil d\'administration va étudier ta demande. Tu recevras sa réponse par e-mail, puis le lien pour régler ta cotisation.', 'nyassobi-wp-plugin'),
+            'message' => __('Le conseil d\'administration va étudier ta demande. Tu recevras sa réponse par e-mail, puis le lien pour régler ta cotisation. Un e-mail de confirmation vient de partir : s\'il n\'est pas dans ta boîte de réception, regarde dans tes spams et ajoute notre adresse à tes contacts, pour ne pas rater la suite.', 'nyassobi-wp-plugin'),
         ];
     }
 
