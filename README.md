@@ -99,18 +99,20 @@ n'est pas exposée et le site renvoie vers l'ancien formulaire d'adhésion.
 
 1. Sur <https://discord.com/developers/applications>, **New Application** (« Nyassobi
    Adhésions » par exemple).
-2. Onglet **Bot** : **Reset Token**, copier le jeton. Désactiver « Public Bot ».
-3. Onglet **Installation** (ou **OAuth2 > URL Generator**) : portée `bot`, permissions
-   « Voir les salons », « Envoyer des messages », « Intégrer des liens », et « Gérer les
-   rôles » pour le rôle « Adhérent » automatique. Ouvrir le lien
-   généré et ajouter l'application au serveur Nyassobi.
-4. Dans Discord, activer le mode développeur (Paramètres > Avancés), puis clic droit pour
+2. Onglet **Installation** : **Lien d'installation** sur « Aucun », enregistrer. Discord
+   refuse sinon de rendre l'application privée à l'étape suivante.
+3. Onglet **Bot** : **Reset Token**, copier le jeton. Désactiver « Public Bot ».
+4. Onglet **OAuth2 > URL Generator** : portée `bot`, permissions « Voir les salons »,
+   « Envoyer des messages », « Intégrer des liens », et « Gérer les rôles » pour le rôle
+   « Adhérent » automatique. Ouvrir le lien généré en bas de page et ajouter
+   l'application au serveur Nyassobi.
+5. Dans Discord, activer le mode développeur (Paramètres > Avancés), puis clic droit pour
    **Copier l'identifiant** du salon privé du CA et du rôle CA. Vérifier que le bot a accès
    au salon.
-5. Dans WordPress, **Adhésions > Réglages** : renseigner l'ID de l'application, la clé
+6. Dans WordPress, **Adhésions > Réglages** : renseigner l'ID de l'application, la clé
    publique (onglet General Information), le jeton du bot, l'ID du salon, l'ID du rôle CA,
    le nombre de membres du CA, le lien de paiement HelloAsso et l'e-mail du bureau.
-6. De retour sur le portail développeur, onglet **General Information**, coller dans
+7. De retour sur le portail développeur, onglet **General Information**, coller dans
    **Interactions Endpoint URL** l'adresse affichée sur la page de réglages
    (`https://admin.nyassobi.fr/wp-json/nyassobi/v1/discord`) et enregistrer : Discord
    vérifie l'adresse sur-le-champ, la sauvegarde échoue si quelque chose cloche.
