@@ -15,6 +15,12 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
+/*
+ * HelloAsso answers 404 to any User-Agent starting with "WordPress", which is
+ * what wp_remote_*() sends by default: every payment call names itself instead.
+ */
+const NYASSOBI_PAYMENT_USER_AGENT = 'Nyassobi-Adhesions/1.0 (+https://nyassobi.fr)';
+
 final class Nyassobi_HelloAsso
 {
     private const TOKEN_TRANSIENT = 'nyassobi_helloasso_access';
@@ -74,7 +80,7 @@ final class Nyassobi_HelloAsso
      */
     private function request_token(array $body): ?string
     {
-        $response = wp_remote_post($this->base() . '/oauth2/token', ['timeout' => 10, 'body' => $body]);
+        $response = wp_remote_post($this->base() . '/oauth2/token', ['timeout' => 10, 'user-agent' => NYASSOBI_PAYMENT_USER_AGENT, 'body' => $body]);
         $data = self::decode($response);
         if (empty($data['access_token'])) {
             error_log('[Nyassobi] HelloAsso : jeton refusé.');
@@ -104,6 +110,7 @@ final class Nyassobi_HelloAsso
             [
                 'method' => $method,
                 'timeout' => 12,
+                'user-agent' => NYASSOBI_PAYMENT_USER_AGENT,
                 'headers' => ['Authorization' => 'Bearer ' . $token, 'Content-Type' => 'application/json', 'Accept' => 'application/json'],
                 'body' => null !== $body ? wp_json_encode($body) : null,
             ]
@@ -211,6 +218,7 @@ final class Nyassobi_PayPal
             $this->base() . '/v1/oauth2/token',
             [
                 'timeout' => 10,
+                'user-agent' => NYASSOBI_PAYMENT_USER_AGENT,
                 'headers' => ['Authorization' => 'Basic ' . base64_encode($this->settings['paypal_client_id'] . ':' . $this->settings['paypal_client_secret'])],
                 'body' => ['grant_type' => 'client_credentials'],
             ]
@@ -241,6 +249,7 @@ final class Nyassobi_PayPal
             [
                 'method' => $method,
                 'timeout' => 15,
+                'user-agent' => NYASSOBI_PAYMENT_USER_AGENT,
                 'headers' => [
                     'Authorization' => 'Bearer ' . $token,
                     'Content-Type' => 'application/json',
