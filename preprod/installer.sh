@@ -62,7 +62,9 @@ wp eval 'update_option("nyassobi_bureau_users", [get_user_by("login", "bureau")-
 
 echo "### Réglages de départ"
 # Seulement les valeurs encore vides : ce qui a été saisi dans l'administration est gardé.
-wp eval '
+# Le conteneur cli ne reçoit pas les variables SMTP : l'adresse lui est passée ici.
+EXPEDITEUR="${SMTP_UTILISATEUR:-}"
+wp eval "\$expediteur = '$EXPEDITEUR';"'
 $defauts = [
     "board_size" => "1",
     "fee_normal" => "20",
@@ -83,10 +85,10 @@ foreach ($defauts as $cle => $valeur) {
         $actuels[$cle] = $valeur;
     }
 }
-$actuels["bureau_email"] = getenv("SMTP_UTILISATEUR") ?: ($actuels["bureau_email"] ?? "");
+$actuels["bureau_email"] = $expediteur ?: ($actuels["bureau_email"] ?? "");
 update_option("nyassobi_membership", $actuels);
 $principal = get_option("nyassobi_wp_plugin", []);
-$principal["contact_email"] = getenv("SMTP_UTILISATEUR") ?: ($principal["contact_email"] ?? "");
+$principal["contact_email"] = $expediteur ?: ($principal["contact_email"] ?? "");
 update_option("nyassobi_wp_plugin", $principal);
 '
 
