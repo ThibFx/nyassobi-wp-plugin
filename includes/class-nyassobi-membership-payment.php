@@ -658,7 +658,8 @@ final class Nyassobi_Membership_Payment
     /** Keeps the last few payment attempts of a request, to check them later. */
     private function remember(int $post_id, string $key, string $id): void
     {
-        $ids = (array) get_post_meta($post_id, $key, true);
+        // A missing meta reads as '', which (array) would keep as a first, empty id.
+        $ids = array_filter((array) get_post_meta($post_id, $key, true), 'strlen');
         $ids[] = $id;
         update_post_meta($post_id, $key, array_slice(array_values(array_unique($ids)), -10));
     }
