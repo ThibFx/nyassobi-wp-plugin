@@ -40,6 +40,9 @@ final class Nyassobi_Membership_Payment
 
     /** Seasons whose end-of-season announcement already went out. */
     private const RENEWALS_SENT_OPTION = 'nyassobi_renewal_reminders_sent';
+    /** End of season: removing the member role, with the CA's go-ahead. */
+    private const CLEANUP_OPTION = 'nyassobi_role_cleanup';
+    private const CLEANUP_HOOK = 'nyassobi_role_cleanup_batch';
 
     private const VIA_LABELS = ['helloasso' => 'carte bancaire (HelloAsso)', 'paypal' => 'PayPal', 'manuel' => 'saisie du bureau'];
 
@@ -70,6 +73,8 @@ final class Nyassobi_Membership_Payment
         add_action('admin_notices', [$this, 'finalized_notice']);
         add_action('admin_menu', [$this, 'register_renewal_page']);
         add_action('admin_post_nyassobi_renewal_send', [$this, 'send_renewal_from_register']);
+        add_filter('nyassobi_discord_component', [$this, 'handle_role_cleanup'], 10, 2);
+        add_action(self::CLEANUP_HOOK, [$this, 'role_cleanup_batch']);
     }
 
     private function membership(): Nyassobi_Membership
@@ -306,6 +311,153 @@ final class Nyassobi_Membership_Payment
         $this->expire_unpaid();
         $this->expire_paid();
         $this->send_renewal_reminders();
+        $this->ask_role_cleanup();
+    }
+
+    /* ------------------------------------------------------------------
+     * End of season: the member role is taken back
+     * ------------------------------------------------------------------ */
+
+    /**
+     * The role is given at payment but memberships end on 31 August. In
+     * September, the CA is asked once per season, on Discord, whether to take
+     * it back from everyone; those who already paid for the new season keep it.
+     */
+    public function ask_role_cleanup(bool $force = false): bool
+    {
+        $s = $this->settings();
+        $season = $this->season();
+        $state = (array) get_option(self::CLEANUP_OPTION, []);
+        $september = 9 === (int) wp_date('n');
+        if ((! $force && ! $september) || ($season === ($state['season'] ?? '') && ! $force)
+            || '' === ($s['discord_guild_id'] ?? '') || '' === ($s['discord_member_role_id'] ?? '') || '' === ($s['discord_channel_id'] ?? '')) {
+            return false;
+        }
+        $posted = $this->membership()->discord_request('POST', '/channels/' . rawurlencode($s['discord_channel_id']) . '/messages', $this->cleanup_prompt($season));
+        if (! isset($posted['id'])) {
+            return false;
+        }
+        update_option(self::CLEANUP_OPTION, ['season' => $season, 'channel' => $s['discord_channel_id'], 'message' => (string) $posted['id'], 'status' => 'asked'], false);
+
+        return true;
+    }
+
+    /** @return array<string,mixed> */
+    private function cleanup_prompt(string $season, string $notice = ''): array
+    {
+        return [
+            'embeds' => [[
+                'title' => '🧹 Fin de saison : retirer le rôle Adhérent ?',
+                'description' => sprintf("Les adhésions de la saison précédente se sont terminées le 31 août. Le rôle Adhérent peut être retiré à tout le monde : ceux qui renouvellent pour %s le récupèrent automatiquement à leur paiement.\nCeux qui ont déjà payé %s et dont la demande est encore dans WordPress le gardent.%s", $season, $season, '' !== $notice ? "\n\n" . $notice : ''),
+                'color' => 0xE8622F,
+            ]],
+            'components' => [[
+                'type' => 1,
+                'components' => [['type' => 2, 'style' => 4, 'label' => 'Retirer le rôle à tous', 'custom_id' => 'nyrole:clean:' . $season]],
+            ]],
+            'allowed_mentions' => ['parse' => []],
+        ];
+    }
+
+    /** Discord accounts that already paid for the new season, still in WordPress. */
+    private function renewed_accounts(string $season): array
+    {
+        $ids = [];
+        $names = [];
+        foreach ($this->paid_ids() as $post_id) {
+            if ($season === $this->meta($post_id, self::META_SEASON)) {
+                $ids[] = $this->meta($post_id, self::META_DISCORD_JOINED);
+                $names[] = $this->meta($post_id, Nyassobi_Membership::META_DISCORD_USERNAME);
+            }
+        }
+
+        return ['ids' => array_values(array_filter($ids)), 'names' => array_values(array_filter($names))];
+    }
+
+    /**
+     * @param \WP_REST_Response|null $response
+     * @param array<string,mixed>     $payload
+     *
+     * @return \WP_REST_Response|null
+     */
+    public function handle_role_cleanup($response, array $payload)
+    {
+        $custom_id = (string) ($payload['data']['custom_id'] ?? '');
+        if (null !== $response || 0 !== strpos($custom_id, 'nyrole:clean:')) {
+            return $response;
+        }
+        $s = $this->settings();
+        if (! in_array($s['discord_board_role_id'] ?? '', (array) ($payload['member']['roles'] ?? []), true)) {
+            return $this->membership()->ephemeral(__('Seuls les membres du CA peuvent faire ça.', 'nyassobi-wp-plugin'));
+        }
+        $state = (array) get_option(self::CLEANUP_OPTION, []);
+        if ('running' === ($state['status'] ?? '')) {
+            return $this->membership()->ephemeral(__('Le retrait est déjà en cours.', 'nyassobi-wp-plugin'));
+        }
+        $season = substr($custom_id, strlen('nyrole:clean:'));
+        update_option(self::CLEANUP_OPTION, ['season' => $season, 'status' => 'running', 'after' => '0', 'removed' => 0] + $this->renewed_accounts($season) + $state, false);
+        // Many members: done in batches, in the background.
+        wp_schedule_single_event(time(), self::CLEANUP_HOOK);
+        spawn_cron();
+
+        return new \WP_REST_Response(['type' => 7, 'data' => [
+            'embeds' => [['title' => '🧹 Retrait du rôle Adhérent en cours…', 'description' => 'Ce message se mettra à jour à la fin.', 'color' => 0x87685C]],
+            'components' => [],
+        ]], 200);
+    }
+
+    public function role_cleanup_batch(): void
+    {
+        $s = $this->settings();
+        $state = (array) get_option(self::CLEANUP_OPTION, []);
+        if ('running' !== ($state['status'] ?? '')) {
+            return;
+        }
+        $discord = $this->membership();
+        $guild = rawurlencode((string) $s['discord_guild_id']);
+        $role = (string) $s['discord_member_role_id'];
+        $edit = function (array $message) use ($discord, $state): void {
+            $discord->discord_request('PATCH', '/channels/' . rawurlencode((string) ($state['channel'] ?? '')) . '/messages/' . rawurlencode((string) ($state['message'] ?? '')), $message);
+        };
+        $members = $discord->discord_request('GET', '/guilds/' . $guild . '/members?limit=1000&after=' . rawurlencode((string) $state['after']));
+        if (null === $members) {
+            // Listing members needs the "Server Members Intent" of the bot.
+            update_option(self::CLEANUP_OPTION, ['status' => 'asked'] + $state, false);
+            $edit($this->cleanup_prompt((string) $state['season'], '⚠️ Discord refuse de donner la liste des membres : dans le portail développeur, onglet Bot, activez **Server Members Intent**, puis recliquez.'));
+            return;
+        }
+        $done = 0;
+        foreach ($members as $member) {
+            $id = (string) ($member['user']['id'] ?? '');
+            $state['after'] = $id;
+            $keep = in_array($id, (array) ($state['ids'] ?? []), true) || in_array(strtolower((string) ($member['user']['username'] ?? '')), (array) ($state['names'] ?? []), true);
+            if ($keep || ! in_array($role, (array) ($member['roles'] ?? []), true)) {
+                continue;
+            }
+            if (null !== $discord->discord_request('DELETE', '/guilds/' . $guild . '/members/' . rawurlencode($id) . '/roles/' . rawurlencode($role))) {
+                ++$state['removed'];
+            }
+            // Gentle with Discord's rate limits.
+            usleep(250000);
+            if (++$done >= 80) {
+                break;
+            }
+        }
+        $finished = count($members) < 1000 && $done < 80;
+        if (! $finished) {
+            update_option(self::CLEANUP_OPTION, $state, false);
+            wp_schedule_single_event(time() + 30, self::CLEANUP_HOOK);
+            return;
+        }
+        update_option(self::CLEANUP_OPTION, ['status' => 'done', 'ids' => [], 'names' => []] + $state, false);
+        $edit([
+            'embeds' => [[
+                'title' => '✅ Fin de saison : rôle Adhérent retiré',
+                'description' => sprintf('Retiré à %d membre(s). Ceux qui renouvellent pour %s le récupèrent à leur paiement.', (int) $state['removed'], (string) $state['season']),
+                'color' => 0x248046,
+            ]],
+            'components' => [],
+        ]);
     }
 
     /* ------------------------------------------------------------------

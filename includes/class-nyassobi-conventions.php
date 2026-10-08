@@ -68,6 +68,13 @@ final class Nyassobi_Conventions
         'staff' => 'Staff du stand',
         'animation' => 'Animation',
     ];
+    /** Preferred time of day, asked of animators (animations last about an hour). */
+    public const SLOTS = [
+        'matin' => 'matin (10 h – 12 h)',
+        'midi' => 'midi (12 h – 14 h)',
+        'aprem' => 'après-midi (14 h – 16 h)',
+        'fin' => 'fin de journée (16 h – 19 h)',
+    ];
     public const TRAVEL = [
         '1h' => 'moins d\'1 h',
         '2h' => 'moins de 2 h',
@@ -128,6 +135,7 @@ final class Nyassobi_Conventions
         add_action('graphql_register_types', [$this, 'register_graphql']);
         add_filter('nyassobi_discord_command', [$this, 'handle_command'], 10, 2);
         add_filter('nyassobi_discord_component', [$this, 'handle_component'], 10, 2);
+        add_filter('nyassobi_discord_component', [$this, 'handle_volunteer'], 10, 2);
         add_action(Nyassobi_Membership::PURGE_HOOK, [$this, 'purge']);
         add_action(self::ATTACHMENT_HOOK, [$this, 'finish_command'], 10, 3);
         // File inputs on the convention screen need a multipart form.
@@ -212,6 +220,35 @@ final class Nyassobi_Conventions
             'open' => '0' !== $this->meta($id, self::META_OPEN),
             'dates' => self::format_dates($start, $end),
         ];
+    }
+
+    /**
+     * Each day of the convention, Y-m-d (a week at most).
+     *
+     * @return string[]
+     */
+    private function days(int $id): array
+    {
+        $c = $this->convention($id);
+        $day = \DateTimeImmutable::createFromFormat('!Y-m-d', $c['start'], wp_timezone());
+        if (! $day) {
+            return [];
+        }
+        $days = [];
+        while (count($days) < 7 && $day->format('Y-m-d') <= $c['end']) {
+            $days[] = $day->format('Y-m-d');
+            $day = $day->modify('+1 day');
+        }
+
+        return $days;
+    }
+
+    /** « sam. 17 » */
+    private static function day_label(string $day, bool $long = false): string
+    {
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $day, wp_timezone());
+
+        return $date ? wp_date($long ? 'l j F' : 'D j', $date->getTimestamp()) : $day;
     }
 
     /**
@@ -358,7 +395,7 @@ final class Nyassobi_Conventions
     /**
      * Everyone who offered to help at this convention.
      *
-     * @return array<int,array{discord_id:string,name:string,role:string,travel:string,transport:string,animation:string,comment:string,since:int}>
+     * @return array<int,array{discord_id:string,name:string,role:string,travel:string,transport:string,days:string[],slots:string[],animation:string,comment:string,since:int}>
      */
     private function volunteers(int $convention_id): array
     {
@@ -375,6 +412,8 @@ final class Nyassobi_Conventions
                 'role' => (string) $choice['role'],
                 'travel' => (string) $choice['travel'],
                 'transport' => (string) $choice['transport'],
+                'days' => array_values((array) ($choice['days'] ?? $this->days($convention_id))),
+                'slots' => array_values((array) ($choice['slots'] ?? [])),
                 'animation' => $this->meta($rid, self::META_ANIMATION),
                 'comment' => $this->meta($rid, self::META_COMMENT),
                 // First answer first: correcting a typo must not send someone to the bottom.
@@ -455,7 +494,17 @@ final class Nyassobi_Conventions
             if (mb_strlen($transport) > 80) {
                 return __('Le moyen de transport doit tenir en 80 caractères.', 'nyassobi-wp-plugin');
             }
-            $choices[$cid] = ['role' => $role, 'travel' => $travel, 'transport' => $transport];
+            // A one-day convention needs no choice of day.
+            $all_days = $this->days($cid);
+            $days = 1 === count($all_days) ? $all_days : array_values(array_intersect($all_days, array_map('strval', (array) ($raw['days'] ?? []))));
+            if (! $days) {
+                return sprintf(__('Coche le ou les jours où tu peux venir à %s.', 'nyassobi-wp-plugin'), $convention['name']);
+            }
+            $slots = 'animation' === $role ? array_values(array_intersect(array_keys(self::SLOTS), array_map('strval', (array) ($raw['slots'] ?? [])))) : [];
+            if ('animation' === $role && ! $slots) {
+                return sprintf(__('Indique tes horaires préférés pour animer à %s.', 'nyassobi-wp-plugin'), $convention['name']);
+            }
+            $choices[$cid] = ['role' => $role, 'travel' => $travel, 'transport' => $transport, 'days' => $days, 'slots' => $slots];
         }
 
         $animation = sanitize_textarea_field($animation);
@@ -500,6 +549,45 @@ final class Nyassobi_Conventions
         return null;
     }
 
+    /** « sam. 17, dim. 18 » or « les 2 jours ». */
+    private function days_text(int $id, array $days): string
+    {
+        if (count($this->days($id)) <= 1) {
+            return '';
+        }
+        if (count($days) === count($this->days($id))) {
+            return sprintf('les %d jours', count($days));
+        }
+
+        return implode(', ', array_map([self::class, 'day_label'], $days));
+    }
+
+    /** « matin, après-midi » */
+    private static function slots_text(array $slots): string
+    {
+        return implode(', ', array_map(static fn (string $s): string => explode(' (', self::SLOTS[$s] ?? $s)[0], $slots));
+    }
+
+    /**
+     * Staff and animators per day, for conventions of several days.
+     *
+     * @return string « sam. 17 : 3 staff, 1 animation · dim. 18 : … »
+     */
+    private function per_day(int $id, array $people): string
+    {
+        $days = $this->days($id);
+        if (count($days) <= 1) {
+            return '';
+        }
+        $parts = [];
+        foreach ($days as $day) {
+            $here = array_filter($people, static fn ($p) => in_array($day, $p['days'], true));
+            $parts[] = sprintf('%s : %d staff, %d anim.', self::day_label($day), count(array_filter($here, static fn ($p) => 'staff' === $p['role'])), count(array_filter($here, static fn ($p) => 'animation' === $p['role'])));
+        }
+
+        return implode(' · ', $parts);
+    }
+
     /* ------------------------------------------------------------------
      * Discord recap
      * ------------------------------------------------------------------ */
@@ -526,17 +614,23 @@ final class Nyassobi_Conventions
             $anim,
             $kept
         );
+        if ('' !== $this->per_day($id, $people)) {
+            $head .= "\n📆 " . $this->per_day($id, $people);
+        }
 
         $blocks = [];
         foreach ($people as $p) {
             $note = $notes[$p['discord_id']] ?? [];
-            $block = sprintf('%s**%s** <@%s> · %s · 🚗 %s%s',
+            $block = sprintf('%s**%s** <@%s> · %s%s · 🚗 %s%s%s%s',
                 isset(self::STATUSES[$note['status'] ?? '']) ? mb_substr(self::STATUSES[$note['status']], 0, 1) . ' ' : '',
                 $md($p['name']),
                 $p['discord_id'],
                 self::ROLES[$p['role']] ?? $p['role'],
+                '' !== $this->days_text($id, $p['days']) ? ' · 📅 ' . $this->days_text($id, $p['days']) : '',
                 self::TRAVEL[$p['travel']] ?? $p['travel'],
-                '' !== $p['transport'] ? ', ' . $md($p['transport']) : ''
+                '' !== $p['transport'] ? ', ' . $md($p['transport']) : '',
+                $p['slots'] ? ' · 🕐 ' . self::slots_text($p['slots']) : '',
+                ! empty($note['notified']) ? ' · ✉️ prévenu·e' : ''
             );
             if ('staff' !== $p['role'] && '' !== $p['animation']) {
                 $block .= "\n> 🎤 " . str_replace("\n", ' ', $md($short($p['animation'], 300)));
@@ -603,7 +697,7 @@ final class Nyassobi_Conventions
                 $options[] = [
                     'label' => mb_substr($p['name'], 0, 100) ?: 'Sans pseudo',
                     'value' => $p['discord_id'],
-                    'description' => mb_substr((self::ROLES[$p['role']] ?? '') . ' · ' . (self::TRAVEL[$p['travel']] ?? '') . ('' !== $status ? ' · ' . $status : ''), 0, 100),
+                    'description' => mb_substr((self::ROLES[$p['role']] ?? '') . ('' !== $this->days_text($id, $p['days']) ? ' · ' . $this->days_text($id, $p['days']) : '') . ' · ' . (self::TRAVEL[$p['travel']] ?? '') . ('' !== $status ? ' · ' . $status : ''), 0, 100),
                 ];
             }
             $rows[] = ['type' => 1, 'components' => [['type' => 3, 'custom_id' => 'nyconv:pick:' . $id, 'placeholder' => 'Noter un volontaire…', 'options' => $options]]];
@@ -708,6 +802,9 @@ final class Nyassobi_Conventions
             if ('staff' !== $c['needs']) {
                 $counts[] = '🎤 Animation : ' . count(array_filter($people, static fn ($p) => 'animation' === $p['role']));
             }
+            if ('' !== $this->per_day($id, $people)) {
+                $counts[] = '📆 ' . $this->per_day($id, $people);
+            }
             $counts[] = $c['open'] ? '✅ Inscriptions ouvertes' : '🔒 Équipe complète';
             if ('' !== $this->meta($id, self::META_LINK)) {
                 $counts[] = '🔗 [Site de la convention](' . $this->meta($id, self::META_LINK) . ')';
@@ -727,7 +824,15 @@ final class Nyassobi_Conventions
         if ('' === $body) {
             $body = 'Aucune convention à venir pour le moment.';
         } elseif ($any_open) {
-            $body .= "\n\nTu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $this->page_url();
+            $body .= "\n\nTu veux aider sur le stand ou proposer une animation ? Choisis la convention dans le menu ci-dessous, ou va sur " . $this->page_url();
+        }
+
+        $options = [];
+        foreach ($this->upcoming_ids() as $id) {
+            $c = $this->convention($id);
+            if ($c['open'] && count($options) < 25) {
+                $options[] = ['label' => mb_substr($c['name'], 0, 100), 'value' => (string) $id, 'description' => mb_substr($c['dates'] . ('' !== $c['city'] ? ' · ' . $c['city'] : ''), 0, 100)];
+            }
         }
 
         return [
@@ -738,6 +843,7 @@ final class Nyassobi_Conventions
                 'footer' => ['text' => 'Mis à jour automatiquement'],
             ]],
             'allowed_mentions' => ['parse' => []],
+            'components' => $options ? [['type' => 1, 'components' => [['type' => 3, 'custom_id' => 'nyvol:pick', 'placeholder' => '🙋 Me proposer pour une convention…', 'options' => $options]]]] : [],
         ];
     }
 
@@ -1028,7 +1134,7 @@ final class Nyassobi_Conventions
      *
      * @return array{content:string,components:array<int,array<string,mixed>>}
      */
-    private function volunteer_card(int $id, string $discord_id): array
+    private function volunteer_card(int $id, string $discord_id, string $notice = ''): array
     {
         $person = null;
         foreach ($this->volunteers($id) as $p) {
@@ -1043,7 +1149,7 @@ final class Nyassobi_Conventions
         $md = static fn (string $t): string => Nyassobi_Membership::escape_markdown($t);
         $lines = [
             sprintf('**%s** <@%s> · %s', $md($person['name']), $discord_id, $md($this->convention($id)['name'])),
-            sprintf('%s · 🚗 %s%s', self::ROLES[$person['role']] ?? '', self::TRAVEL[$person['travel']] ?? '', '' !== $person['transport'] ? ', ' . $md($person['transport']) : ''),
+            sprintf('%s%s · 🚗 %s%s%s', self::ROLES[$person['role']] ?? '', '' !== $this->days_text($id, $person['days']) ? ' · 📅 ' . $this->days_text($id, $person['days']) : '', self::TRAVEL[$person['travel']] ?? '', '' !== $person['transport'] ? ', ' . $md($person['transport']) : '', $person['slots'] ? ' · 🕐 ' . self::slots_text($person['slots']) : ''),
         ];
         if ('staff' !== $person['role'] && '' !== $person['animation']) {
             $lines[] = '🎤 ' . $md(mb_substr($person['animation'], 0, 500));
@@ -1051,24 +1157,27 @@ final class Nyassobi_Conventions
         if ('' !== $person['comment']) {
             $lines[] = '💬 ' . $md(mb_substr($person['comment'], 0, 500));
         }
-        $lines[] = 'Décision : ' . (self::STATUSES[$note['status']] ?? 'aucune');
+        $lines[] = 'Décision : ' . (self::STATUSES[$note['status']] ?? 'aucune')
+            . (! empty($note['notified']) ? ' · ✉️ prévenu·e en message privé' : '');
         if ('' !== $note['note']) {
             $lines[] = '📝 ' . $md($note['note']);
         }
+        if ('' !== $notice) {
+            $lines[] = $notice;
+        }
         $base = 'nyconv:status:' . $id . ':' . $discord_id . ':';
-
-        return [
-            'content' => implode("\n", $lines),
-            'components' => [[
-                'type' => 1,
-                'components' => [
-                    ['type' => 2, 'style' => 3, 'label' => '✅ Retenir', 'custom_id' => $base . 'retenu'],
-                    ['type' => 2, 'style' => 2, 'label' => '⏳ En attente', 'custom_id' => $base . 'attente'],
-                    ['type' => 2, 'style' => 4, 'label' => '❌ Écarter', 'custom_id' => $base . 'non'],
-                    ['type' => 2, 'style' => 1, 'label' => '📝 Note', 'custom_id' => 'nyconv:note:' . $id . ':' . $discord_id],
-                ],
-            ]],
+        $buttons = [
+            ['type' => 2, 'style' => 3, 'label' => '✅ Retenir', 'custom_id' => $base . 'retenu'],
+            ['type' => 2, 'style' => 2, 'label' => '⏳ En attente', 'custom_id' => $base . 'attente'],
+            ['type' => 2, 'style' => 4, 'label' => '❌ Écarter', 'custom_id' => $base . 'non'],
+            ['type' => 2, 'style' => 1, 'label' => '📝 Note', 'custom_id' => 'nyconv:note:' . $id . ':' . $discord_id],
         ];
+        // The private message only leaves on purpose, never on a misclick.
+        if (in_array($note['status'], ['retenu', 'non'], true) && empty($note['notified'])) {
+            $buttons[] = ['type' => 2, 'style' => 1, 'label' => '📨 Prévenir la personne', 'custom_id' => 'nyconv:notify:' . $id . ':' . $discord_id];
+        }
+
+        return ['content' => implode("\n", $lines), 'components' => [['type' => 1, 'components' => $buttons]]];
     }
 
     /**
@@ -1194,6 +1303,10 @@ final class Nyassobi_Conventions
                 $error = $this->set_note($id, $discord_id, (string) ($parts[4] ?? ''), null);
                 return null !== $error ? $membership->ephemeral($error) : $update($this->volunteer_card($id, $discord_id));
 
+            case 'notify':
+                $sent = $this->notify_volunteer($id, $discord_id);
+                return $update($this->volunteer_card($id, $discord_id, $sent ? '✉️ Message privé envoyé.' : '⚠️ Message privé impossible (messages privés fermés ou personne partie du serveur) : contacte-la directement.'));
+
             case 'note':
                 return self::modal('nyconv:note-modal:' . $id . ':' . $discord_id, 'Note du CA', [
                     self::text_input('note', 'Note (visible du CA seulement)', true, false, 300, $this->notes($id)[$discord_id]['note'] ?? ''),
@@ -1202,6 +1315,208 @@ final class Nyassobi_Conventions
             case 'note-modal':
                 $error = $this->set_note($id, $discord_id, null, '' === trim($values['note'] ?? '') ? '-' : (string) $values['note']);
                 return null !== $error ? $membership->ephemeral($error) : $update($this->volunteer_card($id, $discord_id));
+        }
+
+        return $membership->ephemeral(__('Action inconnue.', 'nyassobi-wp-plugin'));
+    }
+
+    /* ------------------------------------------------------------------
+     * Volunteering from Discord, for members
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Choices being made in the private Discord form, before « Continuer ».
+     *
+     * @return array{role:string,days:string[],travel:string,slots:string[]}
+     */
+    private function draft(string $discord_id, int $id): array
+    {
+        $saved = get_transient('nyassobi_vol_' . $discord_id . '_' . $id);
+        if (is_array($saved)) {
+            return $saved;
+        }
+        $rid = $this->response_id($discord_id);
+        $choice = $rid ? ($this->choices($rid)[$id] ?? null) : null;
+        $needs = $this->convention($id)['needs'];
+        $days = $this->days($id);
+
+        return [
+            'role' => (string) ($choice['role'] ?? ('les-deux' === $needs ? '' : $needs)),
+            'days' => array_values((array) ($choice['days'] ?? (1 === count($days) ? $days : []))),
+            'travel' => (string) ($choice['travel'] ?? ''),
+            'slots' => array_values((array) ($choice['slots'] ?? [])),
+        ];
+    }
+
+    private function save_draft(string $discord_id, int $id, array $draft): void
+    {
+        set_transient('nyassobi_vol_' . $discord_id . '_' . $id, $draft, 30 * MINUTE_IN_SECONDS);
+    }
+
+    /**
+     * The private form: menus for role, days, travel and preferred hours,
+     * redrawn after each choice so the person sees what they picked.
+     *
+     * @return array<string,mixed>
+     */
+    private function volunteer_form(string $discord_id, int $id, string $error = ''): array
+    {
+        $c = $this->convention($id);
+        $draft = $this->draft($discord_id, $id);
+        $rid = $this->response_id($discord_id);
+        $already = $rid && isset($this->choices($rid)[$id]);
+        $lines = [sprintf('🙋 **%s** · %s%s', Nyassobi_Membership::escape_markdown($c['name']), $c['dates'], '' !== $c['city'] ? ' · ' . Nyassobi_Membership::escape_markdown($c['city']) : '')];
+        $lines[] = $already ? 'Tu es déjà proposé·e : change tes choix si besoin, puis **Continuer**.' : 'Choisis tes options, puis **Continuer**. Ça n\'engage à rien : le CA choisit l\'équipe et te recontacte.';
+        if ('' !== $error) {
+            $lines[] = '⚠️ ' . $error;
+        }
+        $select = static function (string $custom_id, string $placeholder, array $choices, array $picked, int $max = 1): array {
+            $options = [];
+            foreach ($choices as $value => $label) {
+                $options[] = ['label' => mb_substr($label, 0, 100), 'value' => (string) $value] + (in_array((string) $value, $picked, true) ? ['default' => true] : []);
+            }
+
+            return ['type' => 1, 'components' => [['type' => 3, 'custom_id' => $custom_id, 'placeholder' => $placeholder, 'options' => $options, 'min_values' => 1, 'max_values' => min($max, count($options))]]];
+        };
+        $rows = [];
+        if ('les-deux' === $c['needs']) {
+            $rows[] = $select('nyvol:role:' . $id, 'Je viens pour…', self::ROLES, [$draft['role']]);
+        }
+        $days = $this->days($id);
+        if (count($days) > 1) {
+            $rows[] = $select('nyvol:days:' . $id, 'Les jours où je peux venir…', array_combine($days, array_map(static fn ($d) => self::day_label($d, true), $days)), $draft['days'], count($days));
+        }
+        $rows[] = $select('nyvol:travel:' . $id, 'Mon temps de trajet…', array_map('ucfirst', self::TRAVEL), [$draft['travel']]);
+        if ('animation' === $draft['role']) {
+            $rows[] = $select('nyvol:slots:' . $id, 'Mes horaires préférés pour animer…', array_map('ucfirst', self::SLOTS), $draft['slots'], count(self::SLOTS));
+        }
+        $buttons = [['type' => 2, 'style' => 1, 'label' => 'Continuer', 'custom_id' => 'nyvol:next:' . $id]];
+        if ($already) {
+            $buttons[] = ['type' => 2, 'style' => 4, 'label' => 'Retirer ma proposition', 'custom_id' => 'nyvol:withdraw:' . $id];
+        }
+        $rows[] = ['type' => 1, 'components' => $buttons];
+
+        return ['content' => implode("\n", $lines), 'components' => $rows, 'allowed_mentions' => ['parse' => []]];
+    }
+
+    /**
+     * Saves this convention's choice, keeping the person's other conventions.
+     *
+     * @param array<string,mixed>|null $choice null withdraws from this convention.
+     */
+    private function save_one(array $session, int $id, ?array $choice, ?string $animation, ?string $comment): ?string
+    {
+        $rid = $this->response_id($session['id']);
+        $all = $rid ? $this->choices($rid) : [];
+        unset($all[$id]);
+        if (null !== $choice) {
+            $all[$id] = $choice;
+        }
+        $raw = [];
+        foreach ($all as $cid => $c) {
+            if ($this->is_upcoming((int) $cid)) {
+                $raw[] = ['conventionId' => (int) $cid] + $c;
+            }
+        }
+
+        return $this->save_response($session, $raw, $animation ?? ($rid ? $this->meta($rid, self::META_ANIMATION) : ''), $comment ?? ($rid ? $this->meta($rid, self::META_COMMENT) : ''));
+    }
+
+    /**
+     * @param \WP_REST_Response|null $response
+     * @param array<string,mixed>     $payload
+     *
+     * @return \WP_REST_Response|null
+     */
+    public function handle_volunteer($response, array $payload)
+    {
+        $custom_id = (string) ($payload['data']['custom_id'] ?? '');
+        if (null !== $response || 0 !== strpos($custom_id, 'nyvol:')) {
+            return $response;
+        }
+        $membership = Nyassobi_Membership::instance();
+        $s = $this->settings();
+        $roles = (array) ($payload['member']['roles'] ?? []);
+        $user = (array) ($payload['member']['user'] ?? []);
+        $discord_id = (string) ($user['id'] ?? '');
+        // Discord vouches for who clicked and their roles: no sign-in needed.
+        if (! ctype_digit($discord_id) || ! (in_array($s['discord_member_role_id'] ?? '', $roles, true) || in_array($s['discord_board_role_id'] ?? '', $roles, true))) {
+            return $membership->ephemeral(__('Les conventions sont réservées aux adhérents : il faut le rôle Adhérent sur le serveur.', 'nyassobi-wp-plugin'));
+        }
+        $session = [
+            'id' => $discord_id,
+            'name' => sanitize_text_field((string) (($payload['member']['nick'] ?? '') ?: (($user['global_name'] ?? '') ?: ($user['username'] ?? '')))),
+            'member' => true,
+        ];
+        $parts = explode(':', $custom_id);
+        $action = $parts[1] ?? '';
+        $id = 'pick' === $action ? (int) (($payload['data']['values'] ?? [])[0] ?? 0) : (int) ($parts[2] ?? 0);
+        if (! $this->is_upcoming($id)) {
+            return $membership->ephemeral(__('Cette convention n\'existe plus.', 'nyassobi-wp-plugin'));
+        }
+        $c = $this->convention($id);
+        $rid = $this->response_id($discord_id);
+        $already = $rid && isset($this->choices($rid)[$id]);
+        $show = static fn (array $data, int $type): \WP_REST_Response => new \WP_REST_Response(['type' => $type, 'data' => $data + (4 === $type ? ['flags' => 64] : [])], 200);
+        $values = array_map('strval', (array) ($payload['data']['values'] ?? []));
+        $draft = $this->draft($discord_id, $id);
+
+        switch ($action) {
+            case 'start':
+            case 'pick':
+                if (! $c['open'] && ! $already) {
+                    return $membership->ephemeral(sprintf(__('L\'équipe de %s est déjà complète. D\'autres conventions arrivent !', 'nyassobi-wp-plugin'), $c['name']));
+                }
+                return $show($this->volunteer_form($discord_id, $id), 4);
+
+            case 'role':
+            case 'days':
+            case 'travel':
+            case 'slots':
+                if ('role' === $action) {
+                    $draft['role'] = (string) ($values[0] ?? '');
+                    if ('animation' !== $draft['role']) {
+                        $draft['slots'] = [];
+                    }
+                } elseif ('travel' === $action) {
+                    $draft['travel'] = (string) ($values[0] ?? '');
+                } else {
+                    $draft[$action] = $values;
+                }
+                $this->save_draft($discord_id, $id, $draft);
+                return $show($this->volunteer_form($discord_id, $id), 7);
+
+            case 'next':
+                $missing = '' === $draft['role'] ? 'ton rôle' : ('' === $draft['travel'] ? 'ton temps de trajet' : (! $draft['days'] ? 'au moins un jour' : ('animation' === $draft['role'] && ! $draft['slots'] ? 'tes horaires préférés' : '')));
+                if ('' !== $missing) {
+                    return $show($this->volunteer_form($discord_id, $id, 'Choisis ' . $missing . '.'), 7);
+                }
+                $choice = $rid ? ($this->choices($rid)[$id] ?? []) : [];
+                $fields = [self::text_input('transport', 'Moyen de transport (facultatif)', false, false, 80, (string) ($choice['transport'] ?? ''), 'Train, voiture, covoiturage…')];
+                if ('animation' === $draft['role']) {
+                    $fields[] = self::text_input('animation', 'L\'animation que tu proposes', true, true, 1000, $rid ? $this->meta($rid, self::META_ANIMATION) : '', 'Karaoké, art, rig, quiz… tout est bien tant que c\'est interactif');
+                }
+                $fields[] = self::text_input('commentaire', 'Précisions ou questions (facultatif)', true, false, 1000, $rid ? $this->meta($rid, self::META_COMMENT) : '');
+                return self::modal('nyvol:modal:' . $id, mb_substr('Me proposer : ' . $c['name'], 0, 45), $fields);
+
+            case 'modal':
+                $form = [];
+                foreach ((array) ($payload['data']['components'] ?? []) as $row) {
+                    foreach (isset($row['component']) ? [$row['component']] : (array) ($row['components'] ?? []) as $field) {
+                        $form[(string) ($field['custom_id'] ?? '')] = (string) ($field['value'] ?? '');
+                    }
+                }
+                $error = $this->save_one($session, $id, $draft + ['transport' => $form['transport'] ?? ''], $form['animation'] ?? null, $form['commentaire'] ?? null);
+                if (null !== $error) {
+                    return $show($this->volunteer_form($discord_id, $id, $error), 7);
+                }
+                delete_transient('nyassobi_vol_' . $discord_id . '_' . $id);
+                return $show(['content' => sprintf(__('✅ C\'est noté pour **%s**, merci ! Le CA choisit l\'équipe et te prévient en message privé. Tu peux modifier ou retirer ta proposition avec le même bouton.', 'nyassobi-wp-plugin'), Nyassobi_Membership::escape_markdown($c['name'])), 'components' => []], 7);
+
+            case 'withdraw':
+                $error = $this->save_one($session, $id, null, null, null);
+                delete_transient('nyassobi_vol_' . $discord_id . '_' . $id);
+                return $show(['content' => $error ?? sprintf(__('Ta proposition pour %s est retirée.', 'nyassobi-wp-plugin'), $c['name']), 'components' => []], 7);
         }
 
         return $membership->ephemeral(__('Action inconnue.', 'nyassobi-wp-plugin'));
@@ -1442,7 +1757,7 @@ final class Nyassobi_Conventions
             // codes are turned into the server's emojis.
             $content = (string) preg_replace_callback('/(?<![<\w]):(\w{2,32}):(?!\d)/', static fn ($m) => $emojis[$m[1]] ?? $m[0], $text);
             if ($c['open']) {
-                $content .= "\n\n👉 Pour te proposer : " . $this->page_url();
+                $content .= "\n\n👉 Pour te proposer : le bouton ci-dessous, ou " . $this->page_url();
             }
             $role = (string) ($this->settings()['discord_member_role_id'] ?? '');
             $mention = $ping && '' !== $role;
@@ -1451,6 +1766,7 @@ final class Nyassobi_Conventions
             }
             $posted = $this->discord_post_with_image($channel, [
                 'content' => mb_substr($content, 0, 2000),
+                'components' => $c['open'] ? [['type' => 1, 'components' => [['type' => 2, 'style' => 1, 'label' => '🙋 Je me propose', 'custom_id' => 'nyvol:start:' . $id]]]] : [],
                 // Only the member role may ring, never @everyone typed by mistake.
                 'allowed_mentions' => $mention ? ['roles' => [$role]] : ['parse' => []],
             ], $image);
@@ -1484,6 +1800,36 @@ final class Nyassobi_Conventions
         update_post_meta($id, self::META_NEWS, $kept);
     }
 
+    /**
+     * Tells a volunteer the CA's decision, in a private message from the bot.
+     */
+    private function notify_volunteer(int $id, string $discord_id): bool
+    {
+        $notes = $this->notes($id);
+        $status = $notes[$discord_id]['status'] ?? '';
+        $person = array_column($this->volunteers($id), null, 'discord_id')[$discord_id] ?? null;
+        if (null === $person || ! in_array($status, ['retenu', 'non'], true)) {
+            return false;
+        }
+        $c = $this->convention($id);
+        $where = $c['dates'] . ('' !== $c['city'] ? ', ' . $c['city'] : '');
+        $days = $this->days_text($id, $person['days']);
+        $text = 'retenu' === $status
+            ? sprintf("🎉 Bonne nouvelle ! Tu es retenu·e pour **%s** (%s), en %s%s.\nLe CA te recontacte bientôt avec les détails : horaires, rendez-vous, défraiement.\nInfos et annonces : %s\n\n— Le CA de Nyassobi", $c['name'], $where, 'staff' === $person['role'] ? 'staff du stand' : 'animation', '' !== $days ? ' (' . $days . ')' : '', $this->page_url())
+            : sprintf("Merci beaucoup pour ta proposition pour **%s** (%s) ! Cette fois, on n'a pas pu te retenir dans l'équipe, mais d'autres conventions arrivent : n'hésite surtout pas à te proposer à nouveau.\n%s\n\n— Le CA de Nyassobi", $c['name'], $where, $this->page_url());
+
+        $discord = Nyassobi_Membership::instance();
+        $dm = $discord->discord_request('POST', '/users/@me/channels', ['recipient_id' => $discord_id]);
+        $sent = isset($dm['id']) && null !== $discord->discord_request('POST', '/channels/' . rawurlencode((string) $dm['id']) . '/messages', ['content' => $text, 'allowed_mentions' => ['parse' => []]]);
+        if ($sent) {
+            $notes[$discord_id]['notified'] = $status;
+            update_post_meta($id, self::META_NOTES, $notes);
+            $this->update_recap($id);
+        }
+
+        return $sent;
+    }
+
     /** CA only. null leaves a field as it is; "-" clears the note. */
     public function set_note(int $id, string $discord_id, ?string $status, ?string $note): ?string
     {
@@ -1494,7 +1840,12 @@ final class Nyassobi_Conventions
         $notes = $this->notes($id);
         $entry = $notes[$discord_id] ?? ['status' => '', 'note' => ''];
         if (null !== $status && '' !== $status) {
-            $entry['status'] = isset(self::STATUSES[$status]) ? $status : '';
+            $new = isset(self::STATUSES[$status]) ? $status : '';
+            if ($new !== ($entry['status'] ?? '')) {
+                // A new decision has not been told to the person yet.
+                unset($entry['notified']);
+            }
+            $entry['status'] = $new;
         }
         if (null !== $note) {
             $entry['note'] = '-' === trim($note) ? '' : mb_substr(sanitize_text_field($note), 0, 300);
@@ -1652,6 +2003,12 @@ final class Nyassobi_Conventions
         if (! function_exists('register_graphql_object_type')) {
             return;
         }
+        register_graphql_object_type('NyassobiConventionDay', [
+            'fields' => [
+                'date' => ['type' => 'String'],
+                'label' => ['type' => 'String', 'description' => 'samedi 17 octobre'],
+            ],
+        ]);
         register_graphql_object_type('NyassobiConventionNews', [
             'fields' => [
                 'date' => ['type' => 'String'],
@@ -1661,6 +2018,7 @@ final class Nyassobi_Conventions
         ]);
         register_graphql_object_type('NyassobiConvention', [
             'fields' => [
+                'days' => ['type' => ['list_of' => 'NyassobiConventionDay']],
                 'description' => ['type' => 'String'],
                 'link' => ['type' => 'String'],
                 'images' => ['type' => ['list_of' => 'String']],
@@ -1689,6 +2047,7 @@ final class Nyassobi_Conventions
 
                     return [
                         'id' => $id, 'name' => $c['name'], 'city' => $c['city'], 'dates' => $c['dates'], 'startDate' => $c['start'], 'endDate' => $c['end'], 'needs' => $c['needs'], 'open' => $c['open'],
+                        'days' => array_map(static fn (string $d): array => ['date' => $d, 'label' => self::day_label($d, true)], $this->days($id)),
                         'description' => $this->meta($id, self::META_DESCRIPTION),
                         'link' => $this->meta($id, self::META_LINK),
                         'images' => array_map([self::class, 'image_url'], $this->images($id)),
@@ -1709,6 +2068,8 @@ final class Nyassobi_Conventions
                 'role' => ['type' => 'String'],
                 'travel' => ['type' => 'String'],
                 'transport' => ['type' => 'String'],
+                'days' => ['type' => ['list_of' => 'String']],
+                'slots' => ['type' => ['list_of' => 'String']],
             ],
         ]);
         register_graphql_object_type('NyassobiConventionSession', [
@@ -1732,7 +2093,7 @@ final class Nyassobi_Conventions
                 $choices = [];
                 foreach ($rid ? $this->choices($rid) : [] as $cid => $choice) {
                     if ($this->is_upcoming((int) $cid)) {
-                        $choices[] = ['conventionId' => (int) $cid] + $choice;
+                        $choices[] = ['conventionId' => (int) $cid, 'days' => $choice['days'] ?? $this->days((int) $cid), 'slots' => $choice['slots'] ?? []] + $choice;
                     }
                 }
 
@@ -1755,6 +2116,8 @@ final class Nyassobi_Conventions
                 'role' => ['type' => ['non_null' => 'String']],
                 'travel' => ['type' => ['non_null' => 'String']],
                 'transport' => ['type' => 'String'],
+                'days' => ['type' => ['list_of' => 'String']],
+                'slots' => ['type' => ['list_of' => 'String']],
             ],
         ]);
         register_graphql_mutation('submitNyassobiConventionResponse', [
@@ -1864,7 +2227,7 @@ final class Nyassobi_Conventions
         }
         echo '<table class="widefat striped"><thead><tr>';
         $notes = $this->notes($post->ID);
-        foreach ([__('Pseudo', 'nyassobi-wp-plugin'), __('Rôle', 'nyassobi-wp-plugin'), __('Trajet', 'nyassobi-wp-plugin'), __('Transport', 'nyassobi-wp-plugin'), __('Animation proposée', 'nyassobi-wp-plugin'), __('Commentaire', 'nyassobi-wp-plugin'), __('Décision du CA', 'nyassobi-wp-plugin'), __('Note du CA', 'nyassobi-wp-plugin')] as $label) {
+        foreach ([__('Pseudo', 'nyassobi-wp-plugin'), __('Rôle', 'nyassobi-wp-plugin'), __('Jours', 'nyassobi-wp-plugin'), __('Trajet', 'nyassobi-wp-plugin'), __('Transport', 'nyassobi-wp-plugin'), __('Horaires préférés', 'nyassobi-wp-plugin'), __('Animation proposée', 'nyassobi-wp-plugin'), __('Commentaire', 'nyassobi-wp-plugin'), __('Décision du CA', 'nyassobi-wp-plugin'), __('Note du CA', 'nyassobi-wp-plugin')] as $label) {
             echo '<th>' . esc_html($label) . '</th>';
         }
         echo '</tr></thead><tbody>';
@@ -1875,7 +2238,7 @@ final class Nyassobi_Conventions
                 $select .= sprintf('<option value="%s"%s>%s</option>', esc_attr($value), selected($note['status'], $value, false), esc_html($label));
             }
             $select .= '</select>';
-            printf('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><input type="text" name="nyassobi_conv_notes[%s][note]" value="%s" maxlength="300" class="regular-text"></td></tr>', esc_html($p['name']), esc_html(self::ROLES[$p['role']] ?? $p['role']), esc_html(self::TRAVEL[$p['travel']] ?? $p['travel']), esc_html($p['transport']), 'staff' !== $p['role'] ? esc_html($p['animation']) : '', esc_html($p['comment']), $select, esc_attr($p['discord_id']), esc_attr($note['note']));
+            printf('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><input type="text" name="nyassobi_conv_notes[%s][note]" value="%s" maxlength="300" class="regular-text"></td></tr>', esc_html($p['name']), esc_html(self::ROLES[$p['role']] ?? $p['role']), esc_html($this->days_text($post->ID, $p['days']) ?: '—'), esc_html(self::TRAVEL[$p['travel']] ?? $p['travel']), esc_html($p['transport']), esc_html(self::slots_text($p['slots'])), 'staff' !== $p['role'] ? esc_html($p['animation']) : '', esc_html($p['comment']), $select, esc_attr($p['discord_id']), esc_attr($note['note']));
         }
         echo '</tbody></table>';
         printf('<p class="description">%s</p>', esc_html__('Décision et note restent internes au CA : elles apparaissent dans le récapitulatif des orgas, jamais pour le volontaire.', 'nyassobi-wp-plugin'));
@@ -2011,9 +2374,11 @@ final class Nyassobi_Conventions
         if (! current_user_can(Nyassobi_Membership::CAP_ADHESIONS) || ! check_admin_referer('nyassobi_conv_export_' . $id) || self::POST_TYPE !== get_post_type($id)) {
             wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
         }
-        $rows = [['Pseudo', 'Rôle', 'Trajet', 'Transport', 'Animation proposée', 'Commentaire']];
+        $notes = $this->notes($id);
+        $rows = [['Pseudo', 'Rôle', 'Jours', 'Trajet', 'Transport', 'Horaires préférés', 'Animation proposée', 'Commentaire', 'Décision du CA', 'Note du CA']];
         foreach ($this->volunteers($id) as $p) {
-            $rows[] = [$p['name'], self::ROLES[$p['role']] ?? $p['role'], self::TRAVEL[$p['travel']] ?? $p['travel'], $p['transport'], 'staff' !== $p['role'] ? $p['animation'] : '', $p['comment']];
+            $note = $notes[$p['discord_id']] ?? [];
+            $rows[] = [$p['name'], self::ROLES[$p['role']] ?? $p['role'], implode(', ', array_map([self::class, 'day_label'], $p['days'])), self::TRAVEL[$p['travel']] ?? $p['travel'], $p['transport'], self::slots_text($p['slots']), 'staff' !== $p['role'] ? $p['animation'] : '', $p['comment'], self::STATUSES[$note['status'] ?? ''] ?? '', (string) ($note['note'] ?? '')];
         }
         nocache_headers();
         header('Content-Type: text/csv; charset=UTF-8');
