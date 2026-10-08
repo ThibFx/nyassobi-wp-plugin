@@ -26,6 +26,8 @@ if ! wp core is-installed >/dev/null 2>&1; then
   wp core install --url=http://localhost:8504 --title="Bac à sable Nyassobi" \
     --admin_user=bureau --admin_password="$MDP" --admin_email=bureau@bac-a-sable.test --skip-email >/dev/null
   wp language core install fr_FR --activate >/dev/null 2>&1 || true
+  # Comme le vrai WordPress de l'asso : dates de paiement et d'export à l'heure de Paris.
+  wp option update timezone_string Europe/Paris >/dev/null
   printf 'Vue du bureau : http://<pi>:8504/wp-admin/\nIdentifiant : bureau\nMot de passe : %s\n' "$MDP" > IDENTIFIANTS.txt
   chmod 600 IDENTIFIANTS.txt
   wp rewrite structure "/%postname%/" >/dev/null

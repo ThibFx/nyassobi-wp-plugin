@@ -43,6 +43,8 @@ if ! wp core is-installed >/dev/null 2>&1; then
   wp core install --url="https://$PREPROD_HOTE:8443" --title="Pré-production Nyassobi" \
     --admin_user=bureau --admin_password="$MDP" --admin_email=bureau@preprod.invalid --skip-email >/dev/null
   wp language core install fr_FR --activate >/dev/null 2>&1 || true
+  # Comme le vrai WordPress de l'asso : dates de paiement et d'export à l'heure de Paris.
+  wp option update timezone_string Europe/Paris >/dev/null
   printf 'Administration : https://%s:8443/wp-admin/\nIdentifiant : bureau\nMot de passe : %s\n' "$PREPROD_HOTE" "$MDP" > IDENTIFIANTS.txt
   chmod 600 IDENTIFIANTS.txt
   wp rewrite structure "/%postname%/" >/dev/null
