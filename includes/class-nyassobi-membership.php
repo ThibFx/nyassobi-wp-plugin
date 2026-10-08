@@ -955,7 +955,7 @@ final class Nyassobi_Membership
         $pair = Nyassobi_Vault::unlock((string) wp_unslash($_POST['passphrase'] ?? ''));
         $back = admin_url('post.php?post=' . $post_id . '&action=edit');
         if (null === $pair) {
-            wp_die(esc_html__('Mot de passe du bureau incorrect.', 'nyassobi-wp-plugin'), '', ['back_link' => true]);
+            wp_die(esc_html(Nyassobi_Vault::wrong_passphrase_message()), '', ['back_link' => true]);
         }
 
         $field = fn (string $key): string => (string) (Nyassobi_Vault::open((string) get_post_meta($post_id, $key, true), $pair) ?? __('(illisible)', 'nyassobi-wp-plugin'));
@@ -1124,7 +1124,7 @@ final class Nyassobi_Membership
                 break;
             case 'changer':
                 if (! Nyassobi_Vault::change((string) wp_unslash($_POST['ancien'] ?? ''), $new)) {
-                    $fail(__('Mot de passe actuel incorrect.', 'nyassobi-wp-plugin'));
+                    $fail(Nyassobi_Vault::is_throttled() ? Nyassobi_Vault::wrong_passphrase_message() : __('Mot de passe actuel incorrect.', 'nyassobi-wp-plugin'));
                 }
                 $message = __('Mot de passe du bureau changé.', 'nyassobi-wp-plugin');
                 break;
@@ -1457,6 +1457,11 @@ final class Nyassobi_Membership
             return false;
         }
         if (! ctype_xdigit($signature) || 128 !== strlen($signature) || ! ctype_xdigit($public_key) || 64 !== strlen($public_key)) {
+            return false;
+        }
+        // The timestamp is part of what Discord signs: refusing old ones stops
+        // a recorded click from being replayed later.
+        if (! ctype_digit($timestamp) || abs(time() - (int) $timestamp) > 5 * MINUTE_IN_SECONDS) {
             return false;
         }
 

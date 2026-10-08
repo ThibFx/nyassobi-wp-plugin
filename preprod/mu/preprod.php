@@ -14,6 +14,27 @@ if (! defined('ABSPATH')) {
 
 const PREPROD_JOURNAL = 'preprod_mails_bloques';
 
+/*
+ * Le Funnel public ne laisse passer que ces deux chemins, mais WordPress lit
+ * aussi ?rest_route= (ou un champ de formulaire du même nom) pour choisir une
+ * autre route : sans ce filtre, toute l'API REST de la pré-production était
+ * joignable depuis Internet par ces deux adresses. Discord et HelloAsso n'y
+ * envoient que du JSON en POST, sans paramètre.
+ */
+(static function (): void {
+    $chemin = (string) parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+    foreach (['/wp-json/nyassobi/v1/discord', '/wp-json/nyassobi/v1/helloasso'] as $public) {
+        if (0 !== strpos($chemin, $public)) {
+            continue;
+        }
+        $exact = $chemin === $public && '' === (string) ($_SERVER['QUERY_STRING'] ?? '') && [] === $_POST && 'POST' === ($_SERVER['REQUEST_METHOD'] ?? '');
+        if (! $exact) {
+            http_response_code(404);
+            exit;
+        }
+    }
+})();
+
 // Assez de demandes par heure pour enchaîner les essais.
 add_filter('nyassobi_membership_submissions_per_hour', static fn (): int => 30);
 

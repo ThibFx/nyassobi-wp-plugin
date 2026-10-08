@@ -105,6 +105,11 @@ final class Nyassobi_Membership_Payment
 
     private function page_url(string $token, string $retour = ''): string
     {
+        // The token comes from the address bar on the public routes: nothing
+        // else than a real one is ever put back into a redirect.
+        if (! preg_match('/^[a-f0-9]{40}$/', $token)) {
+            return $this->settings()['site_url'] . '/';
+        }
         $url = $this->settings()['site_url'] . '/cotisation/' . $token;
 
         return '' !== $retour ? add_query_arg('retour', $retour, $url) : $url;
@@ -714,7 +719,11 @@ final class Nyassobi_Membership_Payment
         $payload = json_decode($request->get_body(), true);
         $post_id = (int) ($payload['metadata']['adhesion'] ?? 0);
         $post = $post_id ? get_post($post_id) : null;
-        if ($post instanceof \WP_Post && Nyassobi_Membership::POST_TYPE === $post->post_type && Nyassobi_Membership::STATUS_ACCEPTED === $this->meta($post_id, Nyassobi_Membership::META_STATUS)) {
+        // Anyone can post here: one real check per request every 30 s at most,
+        // so a flood of fake notifications cannot hammer the HelloAsso API.
+        $recent = 'nyassobi_helloasso_checked_' . $post_id;
+        if ($post instanceof \WP_Post && Nyassobi_Membership::POST_TYPE === $post->post_type && Nyassobi_Membership::STATUS_ACCEPTED === $this->meta($post_id, Nyassobi_Membership::META_STATUS) && ! get_transient($recent)) {
+            set_transient($recent, 1, 30);
             $this->helloasso_check($post_id);
         }
 
@@ -778,7 +787,7 @@ final class Nyassobi_Membership_Payment
         }
         $pair = Nyassobi_Vault::unlock((string) wp_unslash($_POST['passphrase'] ?? ''));
         if (null === $pair) {
-            wp_die(esc_html__('Mot de passe du bureau incorrect.', 'nyassobi-wp-plugin'), '', ['back_link' => true]);
+            wp_die(esc_html(Nyassobi_Vault::wrong_passphrase_message()), '', ['back_link' => true]);
         }
         $open = fn (int $id, string $key): string => (string) (Nyassobi_Vault::open($this->meta($id, $key), $pair) ?? __('(illisible)', 'nyassobi-wp-plugin'));
         $format_date = static function (string $iso): string {

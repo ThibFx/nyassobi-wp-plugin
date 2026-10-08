@@ -321,8 +321,13 @@ final class Nyassobi_PayPal
             $result = $this->call('GET', '/v2/checkout/orders/' . rawurlencode($order_id));
         }
         $unit = $result['data']['purchase_units'][0] ?? [];
+        // The order can be COMPLETED while its capture is still PENDING
+        // (payment under review at PayPal): the money is not there yet.
+        $capture = $unit['payments']['captures'][0] ?? [];
 
-        return 'COMPLETED' === ($result['data']['status'] ?? '') && $reference === (string) ($unit['reference_id'] ?? $reference);
+        return 'COMPLETED' === ($result['data']['status'] ?? '')
+            && 'COMPLETED' === ($capture['status'] ?? '')
+            && $reference === (string) ($unit['reference_id'] ?? '');
     }
 
     /**

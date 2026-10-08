@@ -26,6 +26,9 @@ final class Nyassobi_Vault
     private const OPTION = 'nyassobi_vault';
     private const PREFIX = 'nyv1:';
     public const MIN_PASSPHRASE = 10;
+    private const FAILS_PREFIX = 'nyassobi_vault_fails_';
+    private const MAX_FAILS = 5;
+    private const LOCKOUT_SECONDS = 15 * MINUTE_IN_SECONDS;
 
     public static function is_ready(): bool
     {
@@ -85,10 +88,10 @@ final class Nyassobi_Vault
         );
     }
 
-    /** The key pair, or null if the passphrase is wrong. */
+    /** The key pair, or null if the passphrase is wrong (or too many were). */
     public static function unlock(string $passphrase): ?string
     {
-        if (! self::is_ready() || '' === $passphrase) {
+        if (! self::is_ready() || '' === $passphrase || self::is_throttled()) {
             return null;
         }
         $vault = (array) get_option(self::OPTION);
@@ -96,7 +99,31 @@ final class Nyassobi_Vault
         $pair = sodium_crypto_secretbox_open((string) base64_decode((string) $vault['locked'], true), (string) base64_decode((string) $vault['nonce'], true), $key);
         sodium_memzero($key);
 
-        return false === $pair ? null : $pair;
+        $fails = self::FAILS_PREFIX . get_current_user_id();
+        if (false === $pair) {
+            set_transient($fails, (int) get_transient($fails) + 1, self::LOCKOUT_SECONDS);
+            return null;
+        }
+        delete_transient($fails);
+
+        return $pair;
+    }
+
+    /**
+     * Guessing the passphrase from a stolen bureau session is slowed down:
+     * after a few wrong ones the account waits. Each try also costs the
+     * server 64 MB (Argon2id), which this keeps from being run in a loop.
+     */
+    public static function is_throttled(): bool
+    {
+        return (int) get_transient(self::FAILS_PREFIX . get_current_user_id()) >= self::MAX_FAILS;
+    }
+
+    public static function wrong_passphrase_message(): string
+    {
+        return self::is_throttled()
+            ? __('Trop d\'essais de mot de passe : réessayez dans 15 minutes.', 'nyassobi-wp-plugin')
+            : __('Mot de passe du bureau incorrect.', 'nyassobi-wp-plugin');
     }
 
     /** Encrypts for the bureau. Needs no passphrase: only the public key. */
