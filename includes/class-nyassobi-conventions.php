@@ -565,7 +565,8 @@ final class Nyassobi_Conventions
             'components' => [
                 ['type' => 2, 'style' => 2, 'label' => '📝 Infos', 'custom_id' => 'nyconv:infos:' . $id],
                 ['type' => 2, 'style' => 2, 'label' => '📣 Annonce', 'custom_id' => 'nyconv:news:' . $id],
-                ['type' => 2, 'style' => $c['open'] ? 4 : 3, 'label' => $c['open'] ? '🔒 Fermer les inscriptions' : '🔓 Rouvrir les inscriptions', 'custom_id' => 'nyconv:toggle:' . $id],
+                ['type' => 2, 'style' => $c['open'] ? 2 : 3, 'label' => $c['open'] ? '🔒 Fermer les inscriptions' : '🔓 Rouvrir les inscriptions', 'custom_id' => 'nyconv:toggle:' . $id],
+                ['type' => 2, 'style' => 4, 'label' => '🗑️ Supprimer', 'custom_id' => 'nyconv:delete:' . $id],
             ],
         ]];
         $people = $this->volunteers($id);
@@ -593,7 +594,7 @@ final class Nyassobi_Conventions
             'embeds' => [[
                 'title' => '🎪 Conventions · panneau du CA',
                 'description' => "Ajoute une convention avec le bouton ci-dessous : un formulaire s'ouvre.\n\n"
-                    . "Sous chaque récapitulatif : **📝 Infos** (description et lien, visibles des adhérents), **📣 Annonce**, **🔒 Fermer / 🔓 Rouvrir**, et le menu **Noter un volontaire…** (décision et note, visibles du CA seulement).\n\n"
+                    . "Sous chaque récapitulatif : **📝 Infos** (description et lien, visibles des adhérents), **📣 Annonce**, **🔒 Fermer / 🔓 Rouvrir**, **🗑️ Supprimer**, et le menu **Noter un volontaire…** (décision et note, visibles du CA seulement).\n\n"
                     . "Pour ajouter une affiche ou des photos : `/convention-infos` avec l'image en pièce jointe, ou WordPress.",
                 'color' => 0xE8622F,
             ]],
@@ -1129,6 +1130,33 @@ final class Nyassobi_Conventions
                 update_post_meta($id, self::META_OPEN, $c['open'] ? '0' : '1');
                 $this->update_summary();
                 return new \WP_REST_Response(['type' => 7, 'data' => $this->recap_message($id)], 200);
+
+            case 'delete':
+                // Erasing is final: a private confirmation first.
+                $count = count($this->volunteers($id));
+                return new \WP_REST_Response(['type' => 4, 'data' => [
+                    'flags' => 64,
+                    'content' => sprintf(
+                        __('Supprimer **%1$s** (%2$s) ? %3$d réponse(s) de volontaires, les infos, images et annonces seront effacées, ainsi que ses messages sur Discord. C\'est définitif.', 'nyassobi-wp-plugin'),
+                        Nyassobi_Membership::escape_markdown($c['name']),
+                        $c['dates'],
+                        $count
+                    ),
+                    'components' => [[
+                        'type' => 1,
+                        'components' => [
+                            ['type' => 2, 'style' => 4, 'label' => 'Oui, supprimer', 'custom_id' => 'nyconv:delete-ok:' . $id],
+                            ['type' => 2, 'style' => 2, 'label' => 'Annuler', 'custom_id' => 'nyconv:delete-no:' . $id],
+                        ],
+                    ]],
+                ]], 200);
+
+            case 'delete-no':
+                return $update(['content' => __('Suppression annulée.', 'nyassobi-wp-plugin'), 'components' => []]);
+
+            case 'delete-ok':
+                wp_delete_post($id, true);
+                return $update(['content' => sprintf(__('%s est supprimée, avec ses réponses, infos et messages.', 'nyassobi-wp-plugin'), $c['name']), 'components' => []]);
 
             case 'pick':
                 $picked = (string) (($payload['data']['values'] ?? [])[0] ?? '');
