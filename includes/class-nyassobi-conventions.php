@@ -779,6 +779,7 @@ final class Nyassobi_Conventions
                 'options' => array_merge($convention, [
                     ['type' => 3, 'name' => 'texte', 'description' => 'L\'annonce', 'required' => true, 'max_length' => 1500],
                     ['type' => 11, 'name' => 'image', 'description' => 'Image jointe', 'required' => false],
+                    ['type' => 5, 'name' => 'mentionner', 'description' => 'Mentionner le rôle Adhérent (oui par défaut)', 'required' => false],
                 ]),
             ],
             [
@@ -921,9 +922,9 @@ final class Nyassobi_Conventions
             return $error ?? sprintf(__('Note enregistrée pour %s, visible dans le récapitulatif des orgas.', 'nyassobi-wp-plugin'), $c['name']);
         }
         if ('convention-annonce' === $name) {
-            $error = $this->add_news($id, (string) ($options['texte'] ?? ''), $image_id);
+            $error = $this->add_news($id, (string) ($options['texte'] ?? ''), $image_id, ! isset($options['mentionner']) || '' !== $options['mentionner']);
 
-            return $error ?? sprintf(__('Annonce publiée pour %s : sur la page Conventions du site et dans le salon public.', 'nyassobi-wp-plugin'), $c['name']);
+            return $error ?? sprintf(__('Annonce publiée pour %s : sur la page Conventions du site et dans le salon des annonces.', 'nyassobi-wp-plugin'), $c['name']);
         }
 
         $error = $this->set_info($id, $options['texte'] ?? null, $options['lien'] ?? null, $image_id ? [$image_id] : [], ! empty($options['retirer-images']) && 'false' !== $options['retirer-images']);
@@ -1118,12 +1119,13 @@ final class Nyassobi_Conventions
 
             case 'news':
                 return self::modal('nyconv:news-modal:' . $id, 'Annonce : ' . $c['name'], [
-                    self::text_input('texte', 'L\'annonce (visible des adhérents)', true, true, 1500),
+                    self::text_input('texte', 'L\'annonce (visible des adhérents)', true, true, 1500, '', 'Les émojis du serveur s\'écrivent :NyassoHi: ; **gras** possible.'),
+                    self::text_input('mentionner', 'Mentionner les adhérents ? (oui / non)', false, false, 3, 'oui'),
                 ]);
 
             case 'news-modal':
-                $error = $this->add_news($id, $values['texte'] ?? '', 0);
-                return $membership->ephemeral($error ?? sprintf(__('Annonce publiée pour %s : sur la page Conventions du site et dans le salon public.', 'nyassobi-wp-plugin'), $c['name']));
+                $error = $this->add_news($id, $values['texte'] ?? '', 0, 0 !== strpos(mb_strtolower(trim($values['mentionner'] ?? 'oui')), 'n'));
+                return $membership->ephemeral($error ?? sprintf(__('Annonce publiée pour %s : sur la page Conventions du site et dans le salon des annonces.', 'nyassobi-wp-plugin'), $c['name']));
 
             case 'toggle':
                 // Answered by updating the recap the button belongs to.
@@ -1327,7 +1329,9 @@ final class Nyassobi_Conventions
         }
         $name = sanitize_file_name(wp_basename($file));
         $payload['attachments'] = [['id' => 0, 'filename' => $name]];
-        $payload['embeds'][0]['image'] = ['url' => 'attachment://' . $name];
+        if (isset($payload['embeds'][0])) {
+            $payload['embeds'][0]['image'] = ['url' => 'attachment://' . $name];
+        }
         $boundary = 'nyassobi' . bin2hex(random_bytes(8));
         $body = "--$boundary\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n" . wp_json_encode($payload) . "\r\n"
             . "--$boundary\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"$name\"\r\nContent-Type: " . (string) get_post_mime_type($attachment) . "\r\n\r\n" . (string) file_get_contents($file) . "\r\n--$boundary--\r\n";
@@ -1347,29 +1351,86 @@ final class Nyassobi_Conventions
         return is_array($decoded) ? $decoded : [];
     }
 
-    /** An announcement for members: on the site, and posted in the public channel. */
-    public function add_news(int $id, string $text, int $image): ?string
+    /** Where announcements go: their own channel, or else the public table's. */
+    private function news_channel(): string
     {
-        $text = sanitize_textarea_field($text);
-        if ('' === trim($text) && ! $image) {
+        $s = $this->settings();
+
+        return (string) (($s['conventions_news_channel_id'] ?? '') ?: ($s['conventions_summary_channel_id'] ?? ''));
+    }
+
+    /**
+     * The server's own emojis, by name, to turn « :hypejam: » typed in a form
+     * into the real emoji. Cached: they rarely change.
+     *
+     * @return array<string,string> name => <:name:id> or <a:name:id>
+     */
+    private function server_emojis(): array
+    {
+        $cached = get_transient('nyassobi_conv_emojis');
+        if (is_array($cached)) {
+            return $cached;
+        }
+        $emojis = [];
+        $guild = (string) ($this->settings()['discord_guild_id'] ?? '');
+        $list = '' !== $guild ? Nyassobi_Membership::instance()->discord_request('GET', '/guilds/' . rawurlencode($guild) . '/emojis') : null;
+        foreach ((array) $list as $emoji) {
+            if (isset($emoji['name'], $emoji['id'])) {
+                $emojis[(string) $emoji['name']] = sprintf('<%s:%s:%s>', empty($emoji['animated']) ? '' : 'a', $emoji['name'], $emoji['id']);
+            }
+        }
+        set_transient('nyassobi_conv_emojis', $emojis, HOUR_IN_SECONDS);
+
+        return $emojis;
+    }
+
+    /** Same text for the website: no emoji codes, mentions or Discord markup. */
+    private static function plain_text(string $text, array $emojis): string
+    {
+        $text = (string) preg_replace('/<a?:\w+:\d+>|<@[&!]?\d+>|<#\d+>/', '', $text);
+        $text = (string) preg_replace_callback('/:(\w{2,32}):/', static fn ($m) => isset($emojis[$m[1]]) ? '' : $m[0], $text);
+        $text = str_replace(['**', '__', '~~', '`'], '', $text);
+
+        return trim((string) preg_replace('/[ \t]+(\n|$)/', '$1', (string) preg_replace('/ {2,}/', ' ', $text)));
+    }
+
+    /**
+     * An announcement for members, written like the association's own: a
+     * plain message mentioning the member role, on Discord, and the same
+     * text on the site.
+     */
+    public function add_news(int $id, string $text, int $image, bool $ping = true): ?string
+    {
+        $text = trim(sanitize_textarea_field($text));
+        if ('' === $text && ! $image) {
             return __('L\'annonce est vide.', 'nyassobi-wp-plugin');
         }
         if (mb_strlen($text) > 1500) {
             return __('L\'annonce doit tenir en 1 500 caractères.', 'nyassobi-wp-plugin');
         }
-        $item = ['id' => bin2hex(random_bytes(4)), 'date' => time(), 'text' => $text, 'image' => $image, 'message' => ''];
-        $channel = (string) ($this->settings()['conventions_summary_channel_id'] ?? '');
+        $emojis = $this->server_emojis();
+        $item = ['id' => bin2hex(random_bytes(4)), 'date' => time(), 'text' => self::plain_text($text, $emojis), 'image' => $image, 'message' => '', 'channel' => ''];
+        $channel = $this->news_channel();
         if ('' !== $channel) {
             $c = $this->convention($id);
+            // CA's own markup is kept (bold, line breaks); only typed :emoji:
+            // codes are turned into the server's emojis.
+            $content = (string) preg_replace_callback('/(?<![<\w]):(\w{2,32}):(?!\d)/', static fn ($m) => $emojis[$m[1]] ?? $m[0], $text);
+            if ($c['open']) {
+                $content .= "\n\n👉 Pour te proposer : " . $this->page_url();
+            }
+            $role = (string) ($this->settings()['discord_member_role_id'] ?? '');
+            $mention = $ping && '' !== $role;
+            if ($mention) {
+                $content .= "\n\n<@&" . $role . '>';
+            }
             $posted = $this->discord_post_with_image($channel, [
-                'embeds' => [[
-                    'title' => '📣 ' . mb_substr($c['name'], 0, 200) . ' · ' . $c['dates'],
-                    'description' => Nyassobi_Membership::escape_markdown($text) . "\n\n" . $this->page_url(),
-                    'color' => 0x0F9D93,
-                ]],
-                'allowed_mentions' => ['parse' => []],
+                'content' => mb_substr($content, 0, 2000),
+                // Only the member role may ring, never @everyone typed by mistake.
+                'allowed_mentions' => $mention ? ['roles' => [$role]] : ['parse' => []],
             ], $image);
             $item['message'] = (string) ($posted['id'] ?? '');
+            $item['channel'] = $channel;
         }
         $news = $this->news($id);
         $news[] = $item;
@@ -1380,7 +1441,7 @@ final class Nyassobi_Conventions
 
     private function remove_news(int $id, string $news_id): void
     {
-        $channel = (string) ($this->settings()['conventions_summary_channel_id'] ?? '');
+        $default = (string) ($this->settings()['conventions_summary_channel_id'] ?? '');
         $kept = [];
         foreach ($this->news($id) as $item) {
             if ($item['id'] !== $news_id) {
@@ -1390,6 +1451,7 @@ final class Nyassobi_Conventions
             if ($item['image']) {
                 wp_delete_attachment((int) $item['image'], true);
             }
+            $channel = (string) (($item['channel'] ?? '') ?: $default);
             if ('' !== $channel && '' !== $item['message']) {
                 Nyassobi_Membership::instance()->discord_request('DELETE', '/channels/' . rawurlencode($channel) . '/messages/' . rawurlencode($item['message']));
             }
@@ -1747,7 +1809,8 @@ final class Nyassobi_Conventions
             echo '</tbody></table>';
         }
         printf('<p><label for="nyassobi_conv_annonce"><strong>%s</strong></label><br><textarea id="nyassobi_conv_annonce" name="nyassobi_conv_annonce" rows="3" class="large-text" maxlength="1500"></textarea></p>', esc_html__('Nouvelle annonce', 'nyassobi-wp-plugin'));
-        printf('<p><input type="file" name="nyassobi_conv_annonce_image" accept="image/jpeg,image/png,image/webp,image/gif"> <span class="description">%s</span></p>', esc_html__('Image facultative. Publiée à l\'enregistrement, sur le site et dans le salon public de Discord.', 'nyassobi-wp-plugin'));
+        printf('<p><input type="file" name="nyassobi_conv_annonce_image" accept="image/jpeg,image/png,image/webp,image/gif"> <span class="description">%s</span></p>', esc_html__('Image facultative. Publiée à l\'enregistrement, sur le site et dans le salon des annonces de Discord.', 'nyassobi-wp-plugin'));
+        printf('<p><label><input type="checkbox" name="nyassobi_conv_annonce_ping" value="1" checked> %s</label></p>', esc_html__('Mentionner le rôle Adhérent (notification pour tous les adhérents)', 'nyassobi-wp-plugin'));
     }
 
     public function render_volunteers(\WP_Post $post): void
@@ -1840,7 +1903,7 @@ final class Nyassobi_Conventions
         $file = $upload('nyassobi_conv_annonce_image');
         if ('' !== trim($text) || $file) {
             $stored = $file ? $this->store_image($post_id, $file['bytes'], $file['name']) : 0;
-            $this->add_news($post_id, $text, is_int($stored) ? $stored : 0);
+            $this->add_news($post_id, $text, is_int($stored) ? $stored : 0, ! empty($_POST['nyassobi_conv_annonce_ping']));
         }
 
         if ('publish' === $post->post_status) {

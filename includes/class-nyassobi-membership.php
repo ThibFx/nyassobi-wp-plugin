@@ -387,6 +387,12 @@ final class Nyassobi_Membership
                 'description' => __('Salon privé où arrive le récapitulatif de chaque convention, avec le profil de chaque volontaire.', 'nyassobi-wp-plugin'),
                 'type' => 'id',
             ],
+            'conventions_news_channel_id' => [
+                'section' => 'conventions',
+                'label' => __('ID du salon des annonces', 'nyassobi-wp-plugin'),
+                'description' => __('Où partent les annonces des conventions, avec la mention du rôle Adhérent (par exemple le salon général des annonces). Vide : le salon du tableau public. Le rôle doit être mentionnable, ou le bot avoir la permission « Mentionner @everyone, @here et tous les rôles ».', 'nyassobi-wp-plugin'),
+                'type' => 'id',
+            ],
             'conventions_summary_channel_id' => [
                 'section' => 'conventions',
                 'label' => __('ID du salon du tableau public', 'nyassobi-wp-plugin'),
