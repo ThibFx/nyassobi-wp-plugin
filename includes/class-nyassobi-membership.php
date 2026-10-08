@@ -994,8 +994,11 @@ final class Nyassobi_Membership
     }
 
     /** A small form asking for the bureau passphrase before an action. */
-    public static function passphrase_form(string $action, string $nonce_action, string $button, array $hidden = []): string
+    public static function passphrase_form(string $action, string $nonce_action, string $button, array $hidden = [], bool $inside_form = false): string
     {
+        if ($inside_form) {
+            return self::detached_passphrase_form($action, $nonce_action, $button, $hidden);
+        }
         $fields = '';
         foreach ($hidden as $name => $value) {
             $fields .= sprintf('<input type="hidden" name="%s" value="%s">', esc_attr($name), esc_attr((string) $value));
@@ -1007,6 +1010,35 @@ final class Nyassobi_Membership
             esc_attr($action),
             wp_nonce_field($nonce_action, '_wpnonce', true, false),
             $fields,
+            esc_attr__('Mot de passe du bureau', 'nyassobi-wp-plugin'),
+            esc_html($button)
+        );
+    }
+
+    /**
+     * Same fields, for a place already inside a form (a metabox of the edit
+     * screen): browsers drop a nested <form>, and the click would submit the
+     * post instead. The fields point with form="…" to an empty form printed
+     * at the end of the page.
+     *
+     * @param array<string,string|int> $hidden
+     */
+    private static function detached_passphrase_form(string $action, string $nonce_action, string $button, array $hidden): string
+    {
+        $id = 'nyassobi-form-' . wp_unique_id();
+        add_action('admin_footer', static function () use ($id): void {
+            printf('<form id="%s" method="post" action="%s"></form>', esc_attr($id), esc_url(admin_url('admin-post.php')));
+        });
+        $hidden = ['action' => $action, '_wpnonce' => wp_create_nonce($nonce_action)] + $hidden;
+        $fields = '';
+        foreach ($hidden as $name => $value) {
+            $fields .= sprintf('<input type="hidden" form="%s" name="%s" value="%s">', esc_attr($id), esc_attr($name), esc_attr((string) $value));
+        }
+
+        return sprintf(
+            '<span style="display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap">%1$s<input type="password" form="%2$s" name="passphrase" placeholder="%3$s" autocomplete="off" required class="regular-text" style="width:16em"><button type="submit" form="%2$s" class="button button-primary">%4$s</button></span>',
+            $fields,
+            esc_attr($id),
             esc_attr__('Mot de passe du bureau', 'nyassobi-wp-plugin'),
             esc_html($button)
         );
@@ -1638,7 +1670,7 @@ final class Nyassobi_Membership
             '<tr><th scope="row">%s</th><td><p class="description" style="margin-top:0">%s</p>%s</td></tr>',
             esc_html__('Identité', 'nyassobi-wp-plugin'),
             esc_html($minor ? __('Nom, prénom, date de naissance et autorisation parentale sont chiffrés.', 'nyassobi-wp-plugin') : __('Nom, prénom et date de naissance sont chiffrés.', 'nyassobi-wp-plugin')),
-            self::passphrase_form('nyassobi_membership_reveal', 'nyassobi_membership_reveal_' . $id, __('Afficher', 'nyassobi-wp-plugin'), ['post' => $id]) // phpcs:ignore
+            self::passphrase_form('nyassobi_membership_reveal', 'nyassobi_membership_reveal_' . $id, __('Afficher', 'nyassobi-wp-plugin'), ['post' => $id], true) // phpcs:ignore
         );
         foreach ($rows as $label => $value) {
             printf('<tr><th scope="row">%s</th><td>%s</td></tr>', esc_html($label), esc_html((string) $value));
