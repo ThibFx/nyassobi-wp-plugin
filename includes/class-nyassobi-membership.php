@@ -1423,14 +1423,15 @@ final class Nyassobi_Membership
             return $response instanceof \WP_REST_Response ? $response : $this->ephemeral(__('Commande inconnue.', 'nyassobi-wp-plugin'));
         }
 
-        // Type 3: button click.
-        if (3 !== (int) ($payload['type'] ?? 0)) {
-            return $this->ephemeral(__('Action inconnue.', 'nyassobi-wp-plugin'));
-        }
-
+        // Type 5: a form (modal) sent back. Type 3: button or menu click.
+        $type = (int) ($payload['type'] ?? 0);
         $custom_id = (string) ($payload['data']['custom_id'] ?? '');
-        if (! preg_match('/^' . self::CUSTOM_ID_PREFIX . ':(\d+):(pour|contre|abstention)$/', $custom_id, $match)) {
-            return $this->ephemeral(__('Bouton inconnu.', 'nyassobi-wp-plugin'));
+        $is_vote = 3 === $type && preg_match('/^' . self::CUSTOM_ID_PREFIX . ':(\d+):(pour|contre|abstention)$/', $custom_id, $match);
+        if (! $is_vote) {
+            // Other buttons, menus and forms belong to the conventions.
+            $response = in_array($type, [3, 5], true) ? apply_filters('nyassobi_discord_component', null, $payload) : null;
+
+            return $response instanceof \WP_REST_Response ? $response : $this->ephemeral(__('Action inconnue.', 'nyassobi-wp-plugin'));
         }
         $post_id = (int) $match[1];
         $choice = $match[2];
