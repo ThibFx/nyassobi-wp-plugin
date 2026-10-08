@@ -163,7 +163,8 @@ Pour le registre des membres (tenu hors ligne dans un fichier Excel) : dans **Ad
 bouton « Exporter … pour le registre (Excel) » télécharge les adhésions payées (nom, prénom,
 date de naissance, e-mail, date d'adhésion, cotisation ; jamais le pseudo). Une fois les lignes
 copiées dans le registre, cocher les demandes et choisir l'action groupée « Finaliser » :
-leurs données sont effacées de WordPress.
+leurs données sont effacées de WordPress. Seules les demandes déjà passées dans un export
+peuvent être finalisées, pour ne jamais effacer quelqu'un qui n'est pas encore au registre.
 
 **Fin de saison** : toutes les adhésions se terminent le 31 août. À la date réglée (15 août
 par défaut), le bot annonce la nouvelle saison au rôle « Adhérent » dans le salon choisi, et le

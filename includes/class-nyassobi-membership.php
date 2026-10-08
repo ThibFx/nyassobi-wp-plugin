@@ -80,6 +80,8 @@ final class Nyassobi_Membership
     public const META_DISCORD_USERNAME = '_nyassobi_discord_username';
     /** Line added under the Discord message once paid (role given, or to give by hand). */
     public const META_DISCORD_NOTE = '_nyassobi_discord_note';
+    /** Set by the register export: finalizing erases the data, so only what was exported can go. */
+    public const META_EXPORTED_AT = '_nyassobi_exported_at';
 
     private const VOTE_LABELS = [
         'pour' => 'Pour',
@@ -1662,7 +1664,9 @@ final class Nyassobi_Membership
                 esc_html__('Marquer la cotisation comme payée', 'nyassobi-wp-plugin')
             );
         }
-        if (self::STATUS_PAID === $status) {
+        if (self::STATUS_PAID === $status && '' === (string) get_post_meta($post->ID, self::META_EXPORTED_AT, true)) {
+            echo '<span class="description">' . esc_html__('Pour finaliser, exporter d\'abord pour le registre (bouton en haut de la liste des adhésions).', 'nyassobi-wp-plugin') . '</span>';
+        } elseif (self::STATUS_PAID === $status) {
             printf(
                 '<a class="button button-primary" href="%s" onclick="return confirm(\'%s\');">%s</a>',
                 esc_url($action_url('finalize')),
@@ -1695,7 +1699,7 @@ final class Nyassobi_Membership
         } elseif ('paid' === $action && self::STATUS_ACCEPTED === $status) {
             // Paid another way (cash at a convention, transfer...).
             do_action('nyassobi_membership_mark_paid', $post_id, 'manuel');
-        } elseif ('finalize' === $action && self::STATUS_PAID === $status) {
+        } elseif ('finalize' === $action && self::STATUS_PAID === $status && '' !== (string) get_post_meta($post_id, self::META_EXPORTED_AT, true)) {
             wp_delete_post($post_id, true);
         }
 

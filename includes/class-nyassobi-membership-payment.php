@@ -804,6 +804,10 @@ final class Nyassobi_Membership_Payment
             ];
         }
 
+        foreach (array_slice($rows, 1) as $row) {
+            update_post_meta((int) end($row), Nyassobi_Membership::META_EXPORTED_AT, (string) time());
+        }
+
         nocache_headers();
         header('Content-Type: text/csv; charset=UTF-8');
         header('Content-Disposition: attachment; filename="adhesions-a-inscrire-' . wp_date('Y-m-d') . '.csv"');
@@ -842,8 +846,10 @@ final class Nyassobi_Membership_Payment
         }
         $done = 0;
         foreach ($ids as $id) {
-            // Only paid requests: the others are still waiting for a vote or a payment.
-            if (Nyassobi_Membership::STATUS_PAID === $this->meta((int) $id, Nyassobi_Membership::META_STATUS)) {
+            // Only paid requests that went into an export: the others are still
+            // waiting for a vote or a payment, or are not in the register yet.
+            if (Nyassobi_Membership::STATUS_PAID === $this->meta((int) $id, Nyassobi_Membership::META_STATUS)
+                && '' !== $this->meta((int) $id, Nyassobi_Membership::META_EXPORTED_AT)) {
                 wp_delete_post((int) $id, true);
                 ++$done;
             }
@@ -862,7 +868,7 @@ final class Nyassobi_Membership_Payment
         $skipped = (int) ($_GET['nyassobi_ignorees'] ?? 0);
         printf('<div class="notice notice-success is-dismissible"><p>%s%s</p></div>',
             esc_html(sprintf(_n('%d adhésion finalisée : ses données sont effacées de WordPress.', '%d adhésions finalisées : leurs données sont effacées de WordPress.', $done, 'nyassobi-wp-plugin'), $done)),
-            $skipped ? esc_html(sprintf(_n(' %d demande ignorée (pas encore payée).', ' %d demandes ignorées (pas encore payées).', $skipped, 'nyassobi-wp-plugin'), $skipped)) : ''
+            $skipped ? esc_html(sprintf(_n(' %d demande ignorée (pas encore payée, ou pas encore exportée pour le registre).', ' %d demandes ignorées (pas encore payées, ou pas encore exportées pour le registre).', $skipped, 'nyassobi-wp-plugin'), $skipped)) : ''
         );
     }
 
@@ -877,6 +883,8 @@ final class Nyassobi_Membership_Payment
         $paid_at = (int) $this->meta($post_id, self::META_PAID_AT);
         if ($paid_at) {
             $rows[__('Payée le', 'nyassobi-wp-plugin')] = wp_date('j F Y à H:i', $paid_at) . ' · ' . (self::VIA_LABELS[$this->meta($post_id, self::META_PAID_VIA)] ?? '') . ' · ' . sprintf(__('saison %s', 'nyassobi-wp-plugin'), $this->season($post_id));
+            $exported = (int) $this->meta($post_id, Nyassobi_Membership::META_EXPORTED_AT);
+            $rows[__('Export pour le registre', 'nyassobi-wp-plugin')] = $exported ? wp_date('j F Y à H:i', $exported) : __('pas encore', 'nyassobi-wp-plugin');
             $rows[__('Effacement automatique', 'nyassobi-wp-plugin')] = wp_date('j F Y', $paid_at + (int) $this->settings()['paid_retention_days'] * DAY_IN_SECONDS) . ' ' . __('(sauf finalisation avant)', 'nyassobi-wp-plugin');
         } elseif ($accepted = (int) $this->meta($post_id, self::META_ACCEPTED_AT)) {
             $rows[__('Acceptée le', 'nyassobi-wp-plugin')] = wp_date('j F Y', $accepted) . ('' !== $this->meta($post_id, self::META_REMINDED) ? ' · ' . __('relance envoyée', 'nyassobi-wp-plugin') : '');
