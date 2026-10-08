@@ -367,6 +367,16 @@ final class Nyassobi_Membership
                 'description' => __('Donné automatiquement au paiement. Le rôle du bot doit être placé au-dessus dans la liste des rôles.', 'nyassobi-wp-plugin'),
                 'type' => 'id',
             ],
+            'discord_client_secret' => [
+                'section' => 'role',
+                'label' => __('Client secret de l\'application Discord', 'nyassobi-wp-plugin'),
+                'description' => sprintf(
+                    /* translators: %s: OAuth2 redirect URL */
+                    __('Portail développeur > OAuth2 > Client Secret. Active le bouton « Rejoindre le Discord » envoyé après le paiement : la personne rejoint le serveur avec son rôle en un clic. Dans OAuth2 > Redirects, ajouter : %s', 'nyassobi-wp-plugin'),
+                    rest_url(self::REST_NAMESPACE . '/retour/discord')
+                ),
+                'type' => 'secret',
+            ],
             'sender_email' => [
                 'section' => 'emails',
                 'label' => __('Adresse d\'expédition', 'nyassobi-wp-plugin'),
@@ -453,7 +463,7 @@ final class Nyassobi_Membership
                 esc_html(rest_url(self::REST_NAMESPACE . '/helloasso'))
             ),
             'emails' => '<p>' . esc_html__('Les réponses aux e-mails arrivent à l\'adresse de contact des réglages Nyassobi.', 'nyassobi-wp-plugin') . '</p>',
-            'role' => '<p>' . esc_html__('Facultatif : le formulaire demande alors le pseudo Discord, et le rôle est donné dès le paiement. Le bot doit avoir la permission « Gérer les rôles ».', 'nyassobi-wp-plugin') . '</p>',
+            'role' => '<p>' . esc_html__('Facultatif. Avec le client secret, la personne reçoit après le paiement un lien qui la fait rejoindre le serveur avec son rôle ; sans lui, le formulaire demande le pseudo Discord et le rôle est donné si la personne est déjà sur le serveur. Le bot doit avoir les permissions « Gérer les rôles » et « Créer une invitation ».', 'nyassobi-wp-plugin') . '</p>',
         ];
 
         foreach ($this->get_sections() as $section => $title) {

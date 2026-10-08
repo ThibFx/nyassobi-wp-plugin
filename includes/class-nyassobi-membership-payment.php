@@ -33,6 +33,10 @@ final class Nyassobi_Membership_Payment
     private const META_SEASON = '_nyassobi_season';
     private const META_HELLOASSO_INTENTS = '_nyassobi_helloasso_intents';
     private const META_PAYPAL_ORDERS = '_nyassobi_paypal_orders';
+    /** Discord account that used the join link: the link then only works for it. */
+    private const META_DISCORD_JOINED = '_nyassobi_discord_joined';
+    private const DISCORD_STATE_PREFIX = 'nyassobi_discord_state_';
+    private const DISCORD_ROLE_NOTE = '🎉 Rôle Adhérent donné sur le serveur.';
 
     /** Seasons whose end-of-season announcement already went out. */
     private const RENEWALS_SENT_OPTION = 'nyassobi_renewal_reminders_sent';
@@ -215,8 +219,13 @@ final class Nyassobi_Membership_Payment
         }
 
         $role = $this->give_discord_role($post_id);
+        $join = 'given' !== $role && $this->discord_join_ready();
+        if ($join) {
+            $role = 'link';
+        }
         $notes = [
-            'given' => '🎉 Rôle Adhérent donné sur le serveur.',
+            'given' => self::DISCORD_ROLE_NOTE,
+            'link' => '🔗 Lien envoyé : le rôle sera donné quand la personne rejoindra le serveur.',
             'absent' => '⚠️ Rôle Adhérent à donner à la main (pseudo Discord introuvable sur le serveur, voir la fiche).',
             'error' => '⚠️ Rôle Adhérent à donner à la main (Discord a refusé, voir la fiche).',
         ];
@@ -233,6 +242,11 @@ final class Nyassobi_Membership_Payment
         ];
         if ('given' === $role) {
             $lines[] = __('Ton rôle « Adhérent » t\'attend déjà sur notre serveur Discord.', 'nyassobi-wp-plugin');
+        } elseif ($join) {
+            $lines[] = '';
+            $lines[] = __('Rejoins le serveur Discord de l\'association : ton rôle « Adhérent » y sera donné automatiquement.', 'nyassobi-wp-plugin');
+            $lines[] = $this->discord_join_url($this->meta($post_id, self::META_TOKEN));
+            $lines[] = __('Ce lien est personnel. Il reste valable jusqu\'à ton inscription au registre des membres, dans les prochains jours.', 'nyassobi-wp-plugin');
         } elseif ('' !== ($settings['discord_invite_url'] ?? '')) {
             $lines[] = __('Rejoins-nous sur le serveur Discord de l\'association, le bureau t\'y donnera ton rôle « Adhérent » :', 'nyassobi-wp-plugin');
             $lines[] = $settings['discord_invite_url'];
@@ -538,6 +552,12 @@ final class Nyassobi_Membership_Payment
             },
         ]);
 
+        register_graphql_field('RootQuery', 'nyassobiDiscordJoin', [
+            'type' => ['non_null' => 'Boolean'],
+            'description' => __('Vrai quand le rôle Adhérent est donné par un lien après le paiement : le formulaire n\'a pas besoin du pseudo Discord.', 'nyassobi-wp-plugin'),
+            'resolve' => fn (): bool => $this->discord_join_ready(),
+        ]);
+
         register_graphql_object_type('NyassobiCotisation', [
             'description' => __('Page de paiement personnelle d\'une demande acceptée. Aucune donnée personnelle.', 'nyassobi-wp-plugin'),
             'fields' => [
@@ -548,6 +568,9 @@ final class Nyassobi_Membership_Payment
                 'cardUrl' => ['type' => 'String'],
                 'cardAutomatic' => ['type' => 'Boolean', 'description' => __('Faux si la carte passe par le lien de secours (paiement non détecté).', 'nyassobi-wp-plugin')],
                 'paypalUrl' => ['type' => 'String'],
+                'discordJoinUrl' => ['type' => 'String', 'description' => __('Rejoindre le serveur avec le rôle Adhérent, une fois la cotisation payée.', 'nyassobi-wp-plugin')],
+                'discordJoined' => ['type' => 'Boolean'],
+                'discordServerUrl' => ['type' => 'String'],
             ],
         ]);
         register_graphql_field('RootQuery', 'nyassobiCotisation', [
@@ -572,6 +595,7 @@ final class Nyassobi_Membership_Payment
         $settings = $this->settings();
         $helloasso = $this->helloasso()->is_configured();
         $pay = fn (string $way): string => add_query_arg(['jeton' => $token, 'moyen' => $way], rest_url(Nyassobi_Membership::REST_NAMESPACE . '/payer'));
+        $paid_join = Nyassobi_Membership::STATUS_PAID === $status && $this->discord_join_ready();
 
         return [
             'status' => Nyassobi_Membership::STATUS_PAID === $status ? 'payee' : 'a_payer',
@@ -581,6 +605,9 @@ final class Nyassobi_Membership_Payment
             'cardUrl' => $helloasso ? $pay('helloasso') : (($settings['payment_url'] ?? '') ?: null),
             'cardAutomatic' => $helloasso,
             'paypalUrl' => $this->paypal()->is_configured() ? $pay('paypal') : null,
+            'discordJoinUrl' => $paid_join ? $this->discord_join_url($token) : null,
+            'discordJoined' => '' !== $this->meta($post_id, self::META_DISCORD_JOINED),
+            'discordServerUrl' => $paid_join ? 'https://discord.com/channels/' . rawurlencode((string) $settings['discord_guild_id']) : null,
         ];
     }
 
@@ -597,6 +624,10 @@ final class Nyassobi_Membership_Payment
         register_rest_route($ns, '/retour/helloasso', ['methods' => 'GET', 'callback' => [$this, 'route_helloasso_return'], 'permission_callback' => '__return_true']);
         register_rest_route($ns, '/retour/paypal', ['methods' => 'GET', 'callback' => [$this, 'route_paypal_return'], 'permission_callback' => '__return_true']);
         register_rest_route($ns, '/annule', ['methods' => 'GET', 'callback' => [$this, 'route_cancel'], 'permission_callback' => '__return_true']);
+        // Joining the Discord server after paying. Not under /discord: that
+        // path is the bot's endpoint, the only one the test setup exposes.
+        register_rest_route($ns, '/rejoindre-discord', ['methods' => 'GET', 'callback' => [$this, 'route_discord_join'], 'permission_callback' => '__return_true']);
+        register_rest_route($ns, '/retour/discord', ['methods' => 'GET', 'callback' => [$this, 'route_discord_return'], 'permission_callback' => '__return_true']);
         // HelloAsso notifications are not signed for associations: they are
         // only a signal, the payment is always checked with the API.
         register_rest_route($ns, '/helloasso', ['methods' => 'POST', 'callback' => [$this, 'route_helloasso_notification'], 'permission_callback' => '__return_true']);
@@ -729,6 +760,144 @@ final class Nyassobi_Membership_Payment
 
         // Always 200: HelloAsso would otherwise keep retrying a notification we ignore.
         return new \WP_REST_Response(['ok' => true], 200);
+    }
+
+    /* ------------------------------------------------------------------
+     * Joining the Discord server with the member role
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Discord only lets a bot give a role to someone already on the server.
+     * With OAuth2 ("guilds.join"), the person authorizes once and the bot
+     * adds them to the server with the role in the same call.
+     */
+    private function discord_join_ready(): bool
+    {
+        $settings = $this->settings();
+        foreach (['discord_client_secret', 'discord_application_id', 'discord_guild_id', 'discord_member_role_id', 'discord_bot_token'] as $key) {
+            if ('' === trim((string) ($settings[$key] ?? ''))) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function discord_join_url(string $token): string
+    {
+        return add_query_arg('jeton', $token, rest_url(Nyassobi_Membership::REST_NAMESPACE . '/rejoindre-discord'));
+    }
+
+    private function discord_redirect_uri(): string
+    {
+        return rest_url(Nyassobi_Membership::REST_NAMESPACE . '/retour/discord');
+    }
+
+    public function route_discord_join(\WP_REST_Request $request): void
+    {
+        $token = (string) $request->get_param('jeton');
+        $post_id = $this->find_by_token($token);
+        if (! $post_id || Nyassobi_Membership::STATUS_PAID !== $this->meta($post_id, Nyassobi_Membership::META_STATUS) || ! $this->discord_join_ready()) {
+            $this->go($this->page_url($token));
+        }
+        // The state ties Discord's answer to this request and can be used once.
+        $state = bin2hex(random_bytes(16));
+        set_transient(self::DISCORD_STATE_PREFIX . $state, $post_id, 15 * MINUTE_IN_SECONDS);
+
+        $this->go('https://discord.com/oauth2/authorize?' . http_build_query([
+            'client_id' => $this->settings()['discord_application_id'],
+            'response_type' => 'code',
+            'redirect_uri' => $this->discord_redirect_uri(),
+            'scope' => 'identify guilds.join',
+            'state' => $state,
+            'prompt' => 'consent',
+        ], '', '&', PHP_QUERY_RFC3986));
+    }
+
+    public function route_discord_return(\WP_REST_Request $request): void
+    {
+        $state = (string) $request->get_param('state');
+        $key = self::DISCORD_STATE_PREFIX . (preg_match('/^[a-f0-9]{32}$/', $state) ? $state : 'invalide');
+        $post_id = (int) get_transient($key);
+        delete_transient($key);
+        $token = $post_id ? $this->meta($post_id, self::META_TOKEN) : '';
+        if (! $post_id || Nyassobi_Membership::STATUS_PAID !== $this->meta($post_id, Nyassobi_Membership::META_STATUS)) {
+            $this->go($this->page_url($token));
+        }
+        $code = (string) $request->get_param('code');
+        if ('' !== (string) $request->get_param('error') || '' === $code) {
+            $this->go($this->page_url($token, 'discord-annule'));
+        }
+
+        $this->go($this->page_url($token, $this->discord_join($post_id, $code)));
+    }
+
+    /**
+     * @return string The page message: discord-ok | discord-autre | discord-erreur
+     */
+    private function discord_join(int $post_id, string $code): string
+    {
+        $settings = $this->settings();
+        $agent = 'DiscordBot (https://nyassobi.fr, 1.0)';
+        $response = wp_remote_post('https://discord.com/api/v10/oauth2/token', [
+            'timeout' => 10,
+            'user-agent' => $agent,
+            'body' => [
+                'grant_type' => 'authorization_code',
+                'code' => $code,
+                'redirect_uri' => $this->discord_redirect_uri(),
+                'client_id' => $settings['discord_application_id'],
+                'client_secret' => $settings['discord_client_secret'],
+            ],
+        ]);
+        $access = (string) (json_decode((string) wp_remote_retrieve_body($response), true)['access_token'] ?? '');
+        if ('' === $access) {
+            error_log(sprintf('[Nyassobi] Discord : code d\'autorisation refusé (%d).', (int) wp_remote_retrieve_response_code($response)));
+            return 'discord-erreur';
+        }
+
+        $me = json_decode((string) wp_remote_retrieve_body(wp_remote_get('https://discord.com/api/v10/users/@me', [
+            'timeout' => 10,
+            'user-agent' => $agent,
+            'headers' => ['Authorization' => 'Bearer ' . $access],
+        ])), true);
+        $user_id = (string) ($me['id'] ?? '');
+        $result = 'discord-erreur';
+
+        if ('' === $user_id || ! ctype_digit($user_id)) {
+            error_log('[Nyassobi] Discord : compte de la personne illisible.');
+        } elseif ('' !== $this->meta($post_id, self::META_DISCORD_JOINED) && $this->meta($post_id, self::META_DISCORD_JOINED) !== $user_id) {
+            // A forwarded link must not give the role to a second account.
+            $result = 'discord-autre';
+        } else {
+            $guild = rawurlencode((string) $settings['discord_guild_id']);
+            $role = (string) $settings['discord_member_role_id'];
+            $membership = $this->membership();
+            // Adds the person with the role. Someone already on the server
+            // gets an empty answer and keeps their roles: the role is then
+            // added on its own.
+            $added = $membership->discord_request('PUT', '/guilds/' . $guild . '/members/' . $user_id, ['access_token' => $access, 'roles' => [$role]]);
+            $has_role = null !== $added && in_array($role, (array) ($added['roles'] ?? []), true);
+            if (null !== $added && ! $has_role) {
+                $has_role = null !== $membership->discord_request('PUT', '/guilds/' . $guild . '/members/' . $user_id . '/roles/' . rawurlencode($role));
+            }
+            if ($has_role) {
+                update_post_meta($post_id, self::META_DISCORD_JOINED, $user_id);
+                update_post_meta($post_id, Nyassobi_Membership::META_DISCORD_USERNAME, sanitize_user((string) ($me['username'] ?? ''), true));
+                update_post_meta($post_id, Nyassobi_Membership::META_DISCORD_NOTE, self::DISCORD_ROLE_NOTE);
+                $membership->update_discord_message($post_id);
+                $result = 'discord-ok';
+            }
+        }
+
+        // The access was only needed for this one call: give it back.
+        wp_remote_post('https://discord.com/api/v10/oauth2/token/revoke', [
+            'timeout' => 5,
+            'user-agent' => $agent,
+            'body' => ['token' => $access, 'token_type_hint' => 'access_token', 'client_id' => $settings['discord_application_id'], 'client_secret' => $settings['discord_client_secret']],
+        ]);
+
+        return $result;
     }
 
     /* ------------------------------------------------------------------

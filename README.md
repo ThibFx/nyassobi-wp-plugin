@@ -204,6 +204,22 @@ Le bot doit avoir la permission **Gérer les rôles**, et son propre rôle doit 
 trouvé (pas encore sur le serveur, faute de frappe), le message du CA le signale et l'e-mail
 de bienvenue contient l'invitation.
 
+**Recommandé : le lien « Rejoindre le Discord ».** Discord ne laisse un bot donner un rôle
+qu'à quelqu'un déjà sur le serveur. Avec le *client secret* de l'application (portail
+développeur > OAuth2), l'e-mail de bienvenue et la page de cotisation proposent un bouton :
+la personne autorise Nyassobi sur Discord, et rejoint le serveur avec le rôle en un clic
+(ou reçoit juste le rôle si elle y était déjà). Le formulaire ne demande alors plus le pseudo.
+
+1. Portail développeur > **OAuth2** : copier le **Client Secret** dans **Adhésions >
+   Réglages**, et ajouter dans **Redirects** l'adresse affichée sous ce champ
+   (`…/wp-json/nyassobi/v1/retour/discord`).
+2. Le bot doit aussi pouvoir **Créer une invitation** (permission accordée par défaut à
+   tout le monde sur un serveur).
+
+Le lien est personnel, ne marche qu'une fois la cotisation payée, et seulement pour le
+premier compte Discord qui l'utilise. L'accès donné par Discord sert à cette seule opération
+puis est rendu ; WordPress garde le nom du compte jusqu'à la finalisation.
+
 ### Mutation
 
 ```graphql
