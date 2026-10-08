@@ -50,6 +50,9 @@ add_action('phpmailer_init', static function ($mailer): void {
     $mailer->isSMTP();
     $mailer->Host = (string) (getenv('SMTP_SERVEUR') ?: 'smtp.gmail.com');
     $mailer->Port = 587;
+    // PHPMailer attend 5 minutes par défaut : une page de retour de paiement
+    // resterait bloquée d'autant si le serveur d'envoi ne répond pas.
+    $mailer->Timeout = 15;
     $mailer->SMTPAuth = true;
     $mailer->SMTPSecure = 'tls';
     $mailer->Username = $user;
