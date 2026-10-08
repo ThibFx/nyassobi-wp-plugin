@@ -35,7 +35,7 @@ final class Nyassobi_Membership_Payment
     private const META_PAYPAL_ORDERS = '_nyassobi_paypal_orders';
     /** Discord account that used the join link: the link then only works for it. */
     private const META_DISCORD_JOINED = '_nyassobi_discord_joined';
-    private const DISCORD_STATE_PREFIX = 'nyassobi_discord_state_';
+    public const DISCORD_STATE_PREFIX = 'nyassobi_discord_state_';
     private const DISCORD_ROLE_NOTE = '🎉 Rôle Adhérent donné sur le serveur.';
 
     /** Seasons whose end-of-season announcement already went out. */
@@ -818,8 +818,13 @@ final class Nyassobi_Membership_Payment
     {
         $state = (string) $request->get_param('state');
         $key = self::DISCORD_STATE_PREFIX . (preg_match('/^[a-f0-9]{32}$/', $state) ? $state : 'invalide');
-        $post_id = (int) get_transient($key);
+        $data = get_transient($key);
         delete_transient($key);
+        // The conventions page signs in through the same Discord return address.
+        if (is_array($data) && 'conventions' === ($data['type'] ?? '')) {
+            $this->go(Nyassobi_Conventions::instance()->finish_login((string) $request->get_param('code'), '' !== (string) $request->get_param('error')));
+        }
+        $post_id = is_numeric($data) ? (int) $data : 0;
         $token = $post_id ? $this->meta($post_id, self::META_TOKEN) : '';
         if (! $post_id || Nyassobi_Membership::STATUS_PAID !== $this->meta($post_id, Nyassobi_Membership::META_STATUS)) {
             $this->go($this->page_url($token));

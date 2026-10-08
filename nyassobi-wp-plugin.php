@@ -21,10 +21,12 @@ require __DIR__ . '/includes/class-nyassobi-vault.php';
 require __DIR__ . '/includes/class-nyassobi-membership.php';
 require __DIR__ . '/includes/class-nyassobi-payment-gateways.php';
 require __DIR__ . '/includes/class-nyassobi-membership-payment.php';
+require __DIR__ . '/includes/class-nyassobi-conventions.php';
 
 Nyassobi_WP_Plugin::instance();
 Nyassobi_Membership::instance();
 Nyassobi_Membership_Payment::instance();
+Nyassobi_Conventions::instance();
 
 // The daily purge of stale membership requests must not outlive the plugin.
 register_deactivation_hook(__FILE__, static function (): void {

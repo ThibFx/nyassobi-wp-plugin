@@ -202,6 +202,7 @@ final class Nyassobi_Membership
             'paiement' => __('Paiement de la cotisation', 'nyassobi-wp-plugin'),
             'role' => __('Rôle Discord des adhérents', 'nyassobi-wp-plugin'),
             'emails' => __('Expéditeur des e-mails', 'nyassobi-wp-plugin'),
+            'conventions' => __('Conventions : staff et animateurs', 'nyassobi-wp-plugin'),
         ];
     }
 
@@ -380,6 +381,12 @@ final class Nyassobi_Membership
                 ),
                 'type' => 'secret',
             ],
+            'conventions_channel_id' => [
+                'section' => 'conventions',
+                'label' => __('ID du salon des orgas', 'nyassobi-wp-plugin'),
+                'description' => __('Salon privé où arrive le récapitulatif de chaque convention, avec le profil de chaque volontaire.', 'nyassobi-wp-plugin'),
+                'type' => 'id',
+            ],
             'sender_email' => [
                 'section' => 'emails',
                 'label' => __('Adresse d\'expédition', 'nyassobi-wp-plugin'),
@@ -466,6 +473,7 @@ final class Nyassobi_Membership
                 esc_html(rest_url(self::REST_NAMESPACE . '/helloasso'))
             ),
             'emails' => '<p>' . esc_html__('Les réponses aux e-mails arrivent à l\'adresse de contact des réglages Nyassobi.', 'nyassobi-wp-plugin') . '</p>',
+            'conventions' => '<p>' . esc_html__('Les adhérents se connectent avec Discord sur la page « Conventions » du site pour proposer leur aide. Le récapitulatif de chaque convention est posté dans ce salon, et le CA gère les conventions avec les commandes /convention-ajouter, /convention-fermer, /convention-rouvrir et /convention-liste. Il faut aussi le client secret (section Rôle Discord).', 'nyassobi-wp-plugin') . '</p>',
             'role' => '<p>' . esc_html__('Facultatif. Avec le client secret, la personne reçoit après le paiement un lien qui la fait rejoindre le serveur avec son rôle ; sans lui, le formulaire demande le pseudo Discord et le rôle est donné si la personne est déjà sur le serveur. Le bot doit avoir les permissions « Gérer les rôles » et « Créer une invitation ».', 'nyassobi-wp-plugin') . '</p>',
         ];
 
@@ -1305,7 +1313,7 @@ final class Nyassobi_Membership
         ];
     }
 
-    private static function escape_markdown(string $text): string
+    public static function escape_markdown(string $text): string
     {
         return (string) preg_replace('/([\\\\*_~`|>#\[\]()@:-])/u', '\\\\$1', $text);
     }
@@ -1402,6 +1410,13 @@ final class Nyassobi_Membership
             return new \WP_REST_Response(['type' => 1], 200);
         }
 
+        // Types 2 and 4: slash commands and their autocomplete (conventions).
+        if (in_array((int) ($payload['type'] ?? 0), [2, 4], true)) {
+            $response = apply_filters('nyassobi_discord_command', null, $payload);
+
+            return $response instanceof \WP_REST_Response ? $response : $this->ephemeral(__('Commande inconnue.', 'nyassobi-wp-plugin'));
+        }
+
         // Type 3: button click.
         if (3 !== (int) ($payload['type'] ?? 0)) {
             return $this->ephemeral(__('Action inconnue.', 'nyassobi-wp-plugin'));
@@ -1485,7 +1500,7 @@ final class Nyassobi_Membership
         }
     }
 
-    private function ephemeral(string $message): \WP_REST_Response
+    public function ephemeral(string $message): \WP_REST_Response
     {
         // Type 4 with flag 64: a reply only the clicking person sees.
         return new \WP_REST_Response(['type' => 4, 'data' => ['content' => $message, 'flags' => 64]], 200);

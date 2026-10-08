@@ -1,0 +1,1049 @@
+<?php
+/**
+ * Staff and animators for the conventions where Nyassobi holds a stand.
+ *
+ * Flow: the CA lists the season's conventions (in WordPress, or with slash
+ * commands on Discord). Members sign in on the site with Discord, which
+ * proves they hold the "Adhérent" role, and say for each convention whether
+ * they can come as staff, to run an animation, or both, with their travel
+ * time. Each convention has a recap message in a private Discord channel,
+ * updated on every answer, so the CA can pick the best-suited people.
+ *
+ * Privacy: only the Discord account, the roles, travel times (never a town)
+ * and free comments are kept, and everything about a convention is erased
+ * 30 days after it ends, its Discord recap included.
+ *
+ * @package NyassobiWPPlugin
+ */
+
+declare(strict_types=1);
+
+if (! defined('ABSPATH')) {
+    exit;
+}
+
+final class Nyassobi_Conventions
+{
+    public const POST_TYPE = 'nyassobi_convention';
+    /** WordPress caps post type names at 20 characters. */
+    private const RESPONSE_TYPE = 'nyassobi_volontaire';
+
+    private const META_START = '_nyassobi_conv_debut';
+    private const META_END = '_nyassobi_conv_fin';
+    private const META_CITY = '_nyassobi_conv_ville';
+    private const META_NEEDS = '_nyassobi_conv_besoins';
+    private const META_OPEN = '_nyassobi_conv_ouverte';
+    private const META_MESSAGE = '_nyassobi_conv_message';
+
+    private const META_DISCORD_ID = '_nyassobi_conv_discord_id';
+    private const META_NAME = '_nyassobi_conv_pseudo';
+    private const META_CHOICES = '_nyassobi_conv_choix';
+    private const META_ANIMATION = '_nyassobi_conv_animation';
+    private const META_COMMENT = '_nyassobi_conv_commentaire';
+
+    private const SESSION_PREFIX = 'nyassobi_conv_session_';
+    private const SESSION_SECONDS = 2 * HOUR_IN_SECONDS;
+    private const SAVES_PER_HOUR = 20;
+    private const RETENTION_DAYS = 30;
+
+    /** What the convention needs, and so which roles can be offered. */
+    public const NEEDS = [
+        'les-deux' => 'Staff et animation',
+        'staff' => 'Staff seulement',
+        'animation' => 'Animation seulement',
+    ];
+    public const ROLES = [
+        'staff' => 'Staff du stand',
+        'animation' => 'Animation',
+        'les-deux' => 'Staff et animation',
+    ];
+    public const TRAVEL = [
+        '1h' => 'moins d\'1 h',
+        '2h' => 'moins de 2 h',
+        '4h' => 'moins de 4 h',
+        'plus' => 'plus de 4 h',
+    ];
+
+    private const COMMANDS = ['convention-ajouter', 'convention-fermer', 'convention-rouvrir', 'convention-liste'];
+
+    /** @var self|null */
+    private static $instance = null;
+
+    public static function instance(): self
+    {
+        if (null === self::$instance) {
+            self::$instance = new self();
+        }
+
+        return self::$instance;
+    }
+
+    private function __construct()
+    {
+        add_action('init', [$this, 'register_post_types']);
+        add_action('add_meta_boxes_' . self::POST_TYPE, [$this, 'register_metaboxes']);
+        add_action('save_post_' . self::POST_TYPE, [$this, 'save_convention'], 10, 2);
+        add_action('before_delete_post', [$this, 'on_delete']);
+        add_filter('manage_' . self::POST_TYPE . '_posts_columns', [$this, 'admin_columns']);
+        add_action('manage_' . self::POST_TYPE . '_posts_custom_column', [$this, 'render_admin_column'], 10, 2);
+        add_action('admin_notices', [$this, 'commands_notice']);
+        add_action('admin_post_nyassobi_conventions_commands', [$this, 'handle_install_commands']);
+        add_action('admin_post_nyassobi_conventions_export', [$this, 'export']);
+        add_action('rest_api_init', [$this, 'register_rest_routes']);
+        add_action('graphql_register_types', [$this, 'register_graphql']);
+        add_filter('nyassobi_discord_command', [$this, 'handle_command'], 10, 2);
+        add_action(Nyassobi_Membership::PURGE_HOOK, [$this, 'purge']);
+    }
+
+    /** @return array<string,string> */
+    private function settings(): array
+    {
+        return Nyassobi_Membership::get_settings();
+    }
+
+    /* ------------------------------------------------------------------
+     * Storage
+     * ------------------------------------------------------------------ */
+
+    public function register_post_types(): void
+    {
+        $caps = [
+            'edit_post' => Nyassobi_Membership::CAP_ADHESIONS,
+            'read_post' => Nyassobi_Membership::CAP_ADHESIONS,
+            'delete_post' => Nyassobi_Membership::CAP_ADHESIONS,
+            'edit_posts' => Nyassobi_Membership::CAP_ADHESIONS,
+            'edit_others_posts' => Nyassobi_Membership::CAP_ADHESIONS,
+            'delete_posts' => Nyassobi_Membership::CAP_ADHESIONS,
+            'publish_posts' => Nyassobi_Membership::CAP_ADHESIONS,
+            'read_private_posts' => Nyassobi_Membership::CAP_ADHESIONS,
+            'create_posts' => Nyassobi_Membership::CAP_ADHESIONS,
+        ];
+        register_post_type(self::POST_TYPE, [
+            'labels' => [
+                'name' => __('Conventions', 'nyassobi-wp-plugin'),
+                'singular_name' => __('Convention', 'nyassobi-wp-plugin'),
+                'add_new_item' => __('Ajouter une convention', 'nyassobi-wp-plugin'),
+                'edit_item' => __('Convention', 'nyassobi-wp-plugin'),
+                'not_found' => __('Aucune convention pour le moment.', 'nyassobi-wp-plugin'),
+            ],
+            'public' => false,
+            'show_ui' => true,
+            'show_in_menu' => true,
+            'show_in_rest' => false,
+            'show_in_graphql' => false,
+            'exclude_from_search' => true,
+            'menu_icon' => 'dashicons-tickets-alt',
+            'menu_position' => 27,
+            'supports' => ['title'],
+            'capabilities' => $caps,
+            'map_meta_cap' => false,
+        ]);
+        // One per Discord account, edited through the site only.
+        register_post_type(self::RESPONSE_TYPE, [
+            'public' => false,
+            'show_ui' => false,
+            'show_in_rest' => false,
+            'show_in_graphql' => false,
+            'supports' => ['title'],
+        ]);
+    }
+
+    private function meta(int $post_id, string $key): string
+    {
+        return (string) get_post_meta($post_id, $key, true);
+    }
+
+    /** @return array{id:int,name:string,city:string,start:string,end:string,needs:string,open:bool,dates:string} */
+    private function convention(int $id): array
+    {
+        $start = $this->meta($id, self::META_START);
+        $end = $this->meta($id, self::META_END) ?: $start;
+
+        return [
+            'id' => $id,
+            'name' => get_the_title($id),
+            'city' => $this->meta($id, self::META_CITY),
+            'start' => $start,
+            'end' => $end,
+            'needs' => isset(self::NEEDS[$this->meta($id, self::META_NEEDS)]) ? $this->meta($id, self::META_NEEDS) : 'les-deux',
+            'open' => '0' !== $this->meta($id, self::META_OPEN),
+            'dates' => self::format_dates($start, $end),
+        ];
+    }
+
+    /**
+     * Conventions not over yet, soonest first.
+     *
+     * @return int[]
+     */
+    private function upcoming_ids(): array
+    {
+        return array_map('intval', get_posts([
+            'post_type' => self::POST_TYPE,
+            'post_status' => 'publish',
+            'fields' => 'ids',
+            'posts_per_page' => 100,
+            'meta_query' => [['key' => self::META_END, 'value' => wp_date('Y-m-d'), 'compare' => '>=']],
+            'meta_key' => self::META_START,
+            'orderby' => 'meta_value',
+            'order' => 'ASC',
+        ]));
+    }
+
+    private function is_upcoming(int $id): bool
+    {
+        return self::POST_TYPE === get_post_type($id) && 'publish' === get_post_status($id)
+            && ($this->meta($id, self::META_END) ?: $this->meta($id, self::META_START)) >= wp_date('Y-m-d');
+    }
+
+    /** « 3 et 4 octobre 2026 », « 31 octobre et 1er novembre 2026 ». */
+    public static function format_dates(string $start, string $end): string
+    {
+        $tz = wp_timezone();
+        $a = \DateTimeImmutable::createFromFormat('!Y-m-d', $start, $tz);
+        $b = \DateTimeImmutable::createFromFormat('!Y-m-d', $end, $tz) ?: $a;
+        if (! $a) {
+            return '';
+        }
+        $day = static fn (\DateTimeImmutable $d): string => '1' === $d->format('j') ? '1er' : $d->format('j');
+        $month = static fn (\DateTimeImmutable $d): string => wp_date('F', $d->getTimestamp(), $tz);
+        if ($a == $b) {
+            return $day($a) . ' ' . $month($a) . ' ' . $a->format('Y');
+        }
+        $joint = 1 === (int) $a->diff($b)->days ? ' et ' : ' au ';
+        if ($a->format('Y-m') === $b->format('Y-m')) {
+            return $day($a) . $joint . $day($b) . ' ' . $month($b) . ' ' . $b->format('Y');
+        }
+        if ($a->format('Y') === $b->format('Y')) {
+            return $day($a) . ' ' . $month($a) . $joint . $day($b) . ' ' . $month($b) . ' ' . $b->format('Y');
+        }
+
+        return $day($a) . ' ' . $month($a) . ' ' . $a->format('Y') . $joint . $day($b) . ' ' . $month($b) . ' ' . $b->format('Y');
+    }
+
+    /** « 03/10/2026 », « 3/10 » (next occurrence) or « 2026-10-03 » → 2026-10-03. */
+    public static function parse_date(string $text): ?string
+    {
+        $text = trim($text);
+        if (preg_match('/^(\d{4})-(\d{1,2})-(\d{1,2})$/', $text, $m)) {
+            [$y, $mo, $d] = [(int) $m[1], (int) $m[2], (int) $m[3]];
+        } elseif (preg_match('#^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?$#', $text, $m)) {
+            [$d, $mo] = [(int) $m[1], (int) $m[2]];
+            $y = isset($m[3]) ? (int) $m[3] : (int) wp_date('Y');
+            if ($y < 100) {
+                $y += 2000;
+            }
+            if (! isset($m[3]) && sprintf('%04d-%02d-%02d', $y, $mo, $d) < wp_date('Y-m-d')) {
+                ++$y;
+            }
+        } else {
+            return null;
+        }
+
+        return checkdate($mo, $d, $y) ? sprintf('%04d-%02d-%02d', $y, $mo, $d) : null;
+    }
+
+    /**
+     * @return int|string The new convention, or an error message.
+     */
+    public function create(string $name, string $city, string $start, string $end, string $needs)
+    {
+        $name = sanitize_text_field($name);
+        $city = sanitize_text_field($city);
+        $start_date = self::parse_date($start);
+        $end_date = '' === trim($end) ? $start_date : self::parse_date($end);
+        if ('' === $name || mb_strlen($name) > 80 || mb_strlen($city) > 80) {
+            return __('Le nom (et la ville) doivent faire moins de 80 caractères.', 'nyassobi-wp-plugin');
+        }
+        if (null === $start_date || null === $end_date) {
+            return __('Date illisible : écris-la comme 03/10/2026.', 'nyassobi-wp-plugin');
+        }
+        if ($end_date < $start_date) {
+            return __('La date de fin est avant la date de début.', 'nyassobi-wp-plugin');
+        }
+        if ($end_date < wp_date('Y-m-d')) {
+            return __('Cette convention est déjà passée.', 'nyassobi-wp-plugin');
+        }
+        $id = wp_insert_post(['post_type' => self::POST_TYPE, 'post_status' => 'publish', 'post_title' => $name], true);
+        if (is_wp_error($id)) {
+            return __('La convention n\'a pas pu être enregistrée.', 'nyassobi-wp-plugin');
+        }
+        // Saved by hand: save_convention() only reads the admin form.
+        update_post_meta($id, self::META_START, $start_date);
+        update_post_meta($id, self::META_END, $end_date);
+        update_post_meta($id, self::META_CITY, $city);
+        update_post_meta($id, self::META_NEEDS, isset(self::NEEDS[$needs]) ? $needs : 'les-deux');
+        update_post_meta($id, self::META_OPEN, '1');
+        $this->update_recap((int) $id);
+
+        return (int) $id;
+    }
+
+    private function set_open(int $id, bool $open): void
+    {
+        update_post_meta($id, self::META_OPEN, $open ? '1' : '0');
+        $this->update_recap($id);
+    }
+
+    /* ------------------------------------------------------------------
+     * Answers
+     * ------------------------------------------------------------------ */
+
+    private function response_id(string $discord_id): int
+    {
+        $ids = get_posts([
+            'post_type' => self::RESPONSE_TYPE,
+            'post_status' => 'any',
+            'fields' => 'ids',
+            'posts_per_page' => 1,
+            'meta_query' => [['key' => self::META_DISCORD_ID, 'value' => $discord_id]],
+        ]);
+
+        return $ids ? (int) $ids[0] : 0;
+    }
+
+    /** @return array<int,array{role:string,travel:string,transport:string}> */
+    private function choices(int $response_id): array
+    {
+        $choices = get_post_meta($response_id, self::META_CHOICES, true);
+
+        return is_array($choices) ? $choices : [];
+    }
+
+    /**
+     * Everyone who offered to help at this convention.
+     *
+     * @return array<int,array{discord_id:string,name:string,role:string,travel:string,transport:string,animation:string,comment:string,since:int}>
+     */
+    private function volunteers(int $convention_id): array
+    {
+        $list = [];
+        foreach (get_posts(['post_type' => self::RESPONSE_TYPE, 'post_status' => 'any', 'fields' => 'ids', 'posts_per_page' => -1]) as $rid) {
+            $rid = (int) $rid;
+            $choice = $this->choices($rid)[$convention_id] ?? null;
+            if (null === $choice) {
+                continue;
+            }
+            $list[] = [
+                'discord_id' => $this->meta($rid, self::META_DISCORD_ID),
+                'name' => $this->meta($rid, self::META_NAME),
+                'role' => (string) $choice['role'],
+                'travel' => (string) $choice['travel'],
+                'transport' => (string) $choice['transport'],
+                'animation' => $this->meta($rid, self::META_ANIMATION),
+                'comment' => $this->meta($rid, self::META_COMMENT),
+                // First answer first: correcting a typo must not send someone to the bottom.
+                'since' => (int) get_post_time('U', true, $rid),
+            ];
+        }
+        usort($list, static fn ($a, $b) => $a['since'] <=> $b['since']);
+
+        return $list;
+    }
+
+    /**
+     * @param array<string,mixed>       $session
+     * @param array<int,array<string,mixed>> $raw_choices
+     *
+     * @return string|null Error message, or null once saved.
+     */
+    private function save_response(array $session, array $raw_choices, string $animation, string $comment): ?string
+    {
+        $discord_id = (string) $session['id'];
+        $rate = 'nyassobi_conv_saves_' . $discord_id;
+        if ((int) get_transient($rate) >= self::SAVES_PER_HOUR) {
+            return __('Beaucoup d\'enregistrements d\'un coup : réessaie dans une heure.', 'nyassobi-wp-plugin');
+        }
+        set_transient($rate, (int) get_transient($rate) + 1, HOUR_IN_SECONDS);
+
+        $response_id = $this->response_id($discord_id);
+        $before = $response_id ? $this->choices($response_id) : [];
+        $choices = [];
+        foreach ($raw_choices as $raw) {
+            $cid = (int) ($raw['conventionId'] ?? 0);
+            if (isset($choices[$cid])) {
+                continue;
+            }
+            if (! $this->is_upcoming($cid)) {
+                return __('Une des conventions n\'existe plus : recharge la page.', 'nyassobi-wp-plugin');
+            }
+            $convention = $this->convention($cid);
+            // A closed convention keeps the people already in, but takes no one new.
+            if (! $convention['open'] && ! isset($before[$cid])) {
+                return sprintf(__('L\'équipe de %s est déjà complète.', 'nyassobi-wp-plugin'), $convention['name']);
+            }
+            $role = (string) ($raw['role'] ?? '');
+            $allowed = 'les-deux' === $convention['needs'] ? array_keys(self::ROLES) : [$convention['needs']];
+            if (! in_array($role, $allowed, true)) {
+                return sprintf(__('Choisis ton rôle pour %s.', 'nyassobi-wp-plugin'), $convention['name']);
+            }
+            $travel = (string) ($raw['travel'] ?? '');
+            if (! isset(self::TRAVEL[$travel])) {
+                return sprintf(__('Indique ton temps de trajet pour %s.', 'nyassobi-wp-plugin'), $convention['name']);
+            }
+            $transport = sanitize_text_field((string) ($raw['transport'] ?? ''));
+            if (mb_strlen($transport) > 80) {
+                return __('Le moyen de transport doit tenir en 80 caractères.', 'nyassobi-wp-plugin');
+            }
+            $choices[$cid] = ['role' => $role, 'travel' => $travel, 'transport' => $transport];
+        }
+
+        $animation = sanitize_textarea_field($animation);
+        $comment = sanitize_textarea_field($comment);
+        if (mb_strlen($animation) > 1000 || mb_strlen($comment) > 1000) {
+            return __('La description et le commentaire doivent tenir en 1 000 caractères chacun.', 'nyassobi-wp-plugin');
+        }
+        $animates = (bool) array_filter($choices, static fn ($c) => 'staff' !== $c['role']);
+        if ($animates && '' === trim($animation)) {
+            return __('Décris en quelques mots l\'animation que tu proposes.', 'nyassobi-wp-plugin');
+        }
+
+        if (! $choices) {
+            // Nothing ticked: the answer is withdrawn, not kept empty.
+            if ($response_id) {
+                wp_delete_post($response_id, true);
+            }
+        } else {
+            if (! $response_id) {
+                $response_id = wp_insert_post(['post_type' => self::RESPONSE_TYPE, 'post_status' => 'private', 'post_title' => 'Réponse conventions'], true);
+                if (is_wp_error($response_id) || ! $response_id) {
+                    return __('La réponse n\'a pas pu être enregistrée. Réessaie plus tard.', 'nyassobi-wp-plugin');
+                }
+                update_post_meta($response_id, self::META_DISCORD_ID, $discord_id);
+            }
+            update_post_meta($response_id, self::META_NAME, (string) $session['name']);
+            update_post_meta($response_id, self::META_CHOICES, $choices);
+            update_post_meta($response_id, self::META_ANIMATION, $animates ? $animation : '');
+            update_post_meta($response_id, self::META_COMMENT, $comment);
+        }
+
+        foreach (array_unique(array_merge(array_keys($before), array_keys($choices))) as $cid) {
+            $this->update_recap((int) $cid);
+        }
+
+        return null;
+    }
+
+    /* ------------------------------------------------------------------
+     * Discord recap
+     * ------------------------------------------------------------------ */
+
+    /** @return array<string,mixed> */
+    private function recap_message(int $id): array
+    {
+        $c = $this->convention($id);
+        $people = $this->volunteers($id);
+        $md = static fn (string $t): string => Nyassobi_Membership::escape_markdown($t);
+        $short = static fn (string $t, int $n): string => mb_strlen($t) > $n ? mb_substr($t, 0, $n - 1) . '…' : $t;
+
+        $staff = count(array_filter($people, static fn ($p) => 'animation' !== $p['role']));
+        $anim = count(array_filter($people, static fn ($p) => 'staff' !== $p['role']));
+        $head = sprintf("📅 %s%s · Besoin : %s\n**%d volontaire%s** · staff : %d · animation : %d",
+            $c['dates'],
+            '' !== $c['city'] ? ' · 📍 ' . $md($c['city']) : '',
+            mb_strtolower(self::NEEDS[$c['needs']]),
+            count($people),
+            count($people) > 1 ? 's' : '',
+            $staff,
+            $anim
+        );
+
+        $blocks = [];
+        foreach ($people as $p) {
+            $block = sprintf('**%s** <@%s> · %s · 🚗 %s%s',
+                $md($p['name']),
+                $p['discord_id'],
+                self::ROLES[$p['role']] ?? $p['role'],
+                self::TRAVEL[$p['travel']] ?? $p['travel'],
+                '' !== $p['transport'] ? ', ' . $md($p['transport']) : ''
+            );
+            if ('staff' !== $p['role'] && '' !== $p['animation']) {
+                $block .= "\n> 🎤 " . str_replace("\n", ' ', $md($short($p['animation'], 300)));
+            }
+            if ('' !== $p['comment']) {
+                $block .= "\n> 💬 " . str_replace("\n", ' ', $md($short($p['comment'], 300)));
+            }
+            $blocks[] = $block;
+        }
+
+        // Discord caps an embed at 4 096 characters: the rest is in WordPress.
+        $body = $head;
+        foreach ($blocks as $i => $block) {
+            if (mb_strlen($body . "\n\n" . $block) > 3900) {
+                $body .= sprintf("\n\n… et %d autre(s) : voir la convention dans WordPress.", count($blocks) - $i);
+                break;
+            }
+            $body .= "\n\n" . $block;
+        }
+        if (! $people) {
+            $body .= "\n\nPas encore de volontaire.";
+        }
+
+        return [
+            'embeds' => [[
+                'title' => '🎪 ' . $short($c['name'], 200),
+                'description' => $body,
+                'color' => $c['open'] ? 0xE8622F : 0x87685C,
+                'footer' => ['text' => ($c['open'] ? 'Inscriptions ouvertes' : 'Équipe complète, inscriptions fermées') . ' · effacé 30 jours après la convention'],
+            ]],
+            // Mentions show who each person is without pinging anyone.
+            'allowed_mentions' => ['parse' => []],
+        ];
+    }
+
+    public function update_recap(int $id): void
+    {
+        $channel = (string) ($this->settings()['conventions_channel_id'] ?? '');
+        if ('' === $channel || ! $this->is_upcoming($id)) {
+            return;
+        }
+        $discord = Nyassobi_Membership::instance();
+        $message_id = $this->meta($id, self::META_MESSAGE);
+        if ('' !== $message_id && null !== $discord->discord_request('PATCH', '/channels/' . rawurlencode($channel) . '/messages/' . rawurlencode($message_id), $this->recap_message($id))) {
+            return;
+        }
+        // No message yet, or it was deleted by hand: post a new one.
+        $posted = $discord->discord_request('POST', '/channels/' . rawurlencode($channel) . '/messages', $this->recap_message($id));
+        if (isset($posted['id'])) {
+            update_post_meta($id, self::META_MESSAGE, (string) $posted['id']);
+        }
+    }
+
+    /* ------------------------------------------------------------------
+     * Slash commands, for the CA
+     * ------------------------------------------------------------------ */
+
+    /** @return array<int,array<string,mixed>> */
+    private function command_definitions(): array
+    {
+        $convention = [['type' => 3, 'name' => 'convention', 'description' => 'La convention', 'required' => true, 'autocomplete' => true]];
+        $needs = [];
+        foreach (self::NEEDS as $value => $label) {
+            $needs[] = ['name' => $label, 'value' => $value];
+        }
+
+        return [
+            [
+                'name' => 'convention-ajouter',
+                'description' => 'Ajouter une convention où Nyassobi cherche du staff ou des animateurs',
+                'options' => [
+                    ['type' => 3, 'name' => 'nom', 'description' => 'Nom de la convention', 'required' => true, 'max_length' => 80],
+                    ['type' => 3, 'name' => 'debut', 'description' => 'Premier jour, par exemple 03/10/2026', 'required' => true],
+                    ['type' => 3, 'name' => 'ville', 'description' => 'Ville', 'required' => true, 'max_length' => 80],
+                    ['type' => 3, 'name' => 'fin', 'description' => 'Dernier jour, si plus d\'une journée', 'required' => false],
+                    ['type' => 3, 'name' => 'besoins', 'description' => 'Ce qu\'on cherche (staff et animation par défaut)', 'required' => false, 'choices' => $needs],
+                ],
+            ],
+            ['name' => 'convention-fermer', 'description' => 'Équipe complète : ne plus accepter de volontaires', 'options' => $convention],
+            ['name' => 'convention-rouvrir', 'description' => 'Accepter à nouveau des volontaires', 'options' => $convention],
+            ['name' => 'convention-liste', 'description' => 'Les conventions à venir et leurs volontaires'],
+        ];
+    }
+
+    public function install_commands(): bool
+    {
+        $s = $this->settings();
+        if ('' === ($s['discord_application_id'] ?? '') || '' === ($s['discord_guild_id'] ?? '')) {
+            return false;
+        }
+
+        return null !== Nyassobi_Membership::instance()->discord_request(
+            'PUT',
+            '/applications/' . rawurlencode($s['discord_application_id']) . '/guilds/' . rawurlencode($s['discord_guild_id']) . '/commands',
+            $this->command_definitions()
+        );
+    }
+
+    /**
+     * @param \WP_REST_Response|null $response
+     * @param array<string,mixed>     $payload
+     *
+     * @return \WP_REST_Response|null
+     */
+    public function handle_command($response, array $payload)
+    {
+        $name = (string) ($payload['data']['name'] ?? '');
+        if (null !== $response || ! in_array($name, self::COMMANDS, true)) {
+            return $response;
+        }
+        $membership = Nyassobi_Membership::instance();
+        $roles = (array) ($payload['member']['roles'] ?? []);
+        if (! in_array($this->settings()['discord_board_role_id'] ?? '', $roles, true)) {
+            return $membership->ephemeral(__('Seuls les membres du CA peuvent gérer les conventions.', 'nyassobi-wp-plugin'));
+        }
+        $options = [];
+        $focused = '';
+        foreach ((array) ($payload['data']['options'] ?? []) as $option) {
+            $options[(string) $option['name']] = (string) ($option['value'] ?? '');
+            if (! empty($option['focused'])) {
+                $focused = (string) ($option['value'] ?? '');
+            }
+        }
+
+        // Type 4: suggest conventions while the name is being typed.
+        if (4 === (int) ($payload['type'] ?? 0)) {
+            $want_open = 'convention-fermer' === $name;
+            $choices = [];
+            foreach ($this->upcoming_ids() as $id) {
+                $c = $this->convention($id);
+                if ($c['open'] === $want_open && ('' === $focused || false !== mb_stripos($c['name'], $focused))) {
+                    $choices[] = ['name' => mb_substr($c['name'] . ' · ' . $c['dates'], 0, 100), 'value' => (string) $id];
+                }
+            }
+
+            return new \WP_REST_Response(['type' => 8, 'data' => ['choices' => array_slice($choices, 0, 25)]], 200);
+        }
+
+        switch ($name) {
+            case 'convention-ajouter':
+                $id = $this->create($options['nom'] ?? '', $options['ville'] ?? '', $options['debut'] ?? '', $options['fin'] ?? '', $options['besoins'] ?? 'les-deux');
+                if (is_string($id)) {
+                    return $membership->ephemeral($id);
+                }
+                $c = $this->convention($id);
+                return $membership->ephemeral(sprintf(__('Convention ajoutée : %1$s, %2$s. Elle apparaît sur la page Conventions du site, et son récapitulatif dans le salon des orgas.', 'nyassobi-wp-plugin'), $c['name'], $c['dates']));
+
+            case 'convention-fermer':
+            case 'convention-rouvrir':
+                $id = (int) ($options['convention'] ?? 0);
+                if (! $this->is_upcoming($id)) {
+                    return $membership->ephemeral(__('Convention introuvable : choisis-la dans la liste proposée.', 'nyassobi-wp-plugin'));
+                }
+                $open = 'convention-rouvrir' === $name;
+                $this->set_open($id, $open);
+                return $membership->ephemeral(sprintf($open ? __('%s accepte à nouveau des volontaires.', 'nyassobi-wp-plugin') : __('%s : inscriptions fermées. Les volontaires déjà inscrits restent dans le récapitulatif.', 'nyassobi-wp-plugin'), $this->convention($id)['name']));
+
+            default:
+                $lines = [];
+                foreach ($this->upcoming_ids() as $id) {
+                    $c = $this->convention($id);
+                    $lines[] = sprintf('• **%s** · %s%s · %d volontaire(s)%s', Nyassobi_Membership::escape_markdown($c['name']), $c['dates'], '' !== $c['city'] ? ' · ' . Nyassobi_Membership::escape_markdown($c['city']) : '', count($this->volunteers($id)), $c['open'] ? '' : ' · fermée');
+                }
+                return $membership->ephemeral($lines ? mb_substr(implode("\n", $lines), 0, 1900) : __('Aucune convention à venir.', 'nyassobi-wp-plugin'));
+        }
+    }
+
+    /* ------------------------------------------------------------------
+     * Signing in with Discord
+     * ------------------------------------------------------------------ */
+
+    /** Same Discord application and return address as the membership role button. */
+    private function login_ready(): bool
+    {
+        $s = $this->settings();
+        foreach (['discord_client_secret', 'discord_application_id', 'discord_guild_id', 'discord_member_role_id', 'discord_bot_token'] as $key) {
+            if ('' === trim((string) ($s[$key] ?? ''))) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function page_url(string $fragment = ''): string
+    {
+        return $this->settings()['site_url'] . '/conventions' . ('' !== $fragment ? '#' . $fragment : '');
+    }
+
+    public function register_rest_routes(): void
+    {
+        register_rest_route(Nyassobi_Membership::REST_NAMESPACE, '/conventions/connexion', [
+            'methods' => 'GET',
+            'callback' => [$this, 'route_login'],
+            'permission_callback' => '__return_true',
+        ]);
+    }
+
+    public function route_login(): void
+    {
+        if (! $this->login_ready()) {
+            wp_redirect($this->page_url('erreur=config'), 302, 'Nyassobi');
+            exit;
+        }
+        $state = bin2hex(random_bytes(16));
+        set_transient(Nyassobi_Membership_Payment::DISCORD_STATE_PREFIX . $state, ['type' => 'conventions'], 15 * MINUTE_IN_SECONDS);
+        wp_redirect('https://discord.com/oauth2/authorize?' . http_build_query([
+            'client_id' => $this->settings()['discord_application_id'],
+            'response_type' => 'code',
+            'redirect_uri' => rest_url(Nyassobi_Membership::REST_NAMESPACE . '/retour/discord'),
+            'scope' => 'identify',
+            'state' => $state,
+            // Skips Discord's screen for people who already authorized once.
+            'prompt' => 'none',
+        ], '', '&', PHP_QUERY_RFC3986), 302, 'Nyassobi');
+        exit;
+    }
+
+    /**
+     * Called by the shared Discord return route. The session key goes back in
+     * the address fragment, which browsers never send to any server.
+     */
+    public function finish_login(string $code, bool $cancelled): string
+    {
+        if ($cancelled || '' === $code) {
+            return $this->page_url('erreur=annule');
+        }
+        $s = $this->settings();
+        $agent = 'DiscordBot (https://nyassobi.fr, 1.0)';
+        $response = wp_remote_post('https://discord.com/api/v10/oauth2/token', [
+            'timeout' => 10,
+            'user-agent' => $agent,
+            'body' => [
+                'grant_type' => 'authorization_code',
+                'code' => $code,
+                'redirect_uri' => rest_url(Nyassobi_Membership::REST_NAMESPACE . '/retour/discord'),
+                'client_id' => $s['discord_application_id'],
+                'client_secret' => $s['discord_client_secret'],
+            ],
+        ]);
+        $access = (string) (json_decode((string) wp_remote_retrieve_body($response), true)['access_token'] ?? '');
+        if ('' === $access) {
+            error_log(sprintf('[Nyassobi] Conventions : connexion Discord refusée (%d).', (int) wp_remote_retrieve_response_code($response)));
+            return $this->page_url('erreur=discord');
+        }
+        $me = json_decode((string) wp_remote_retrieve_body(wp_remote_get('https://discord.com/api/v10/users/@me', [
+            'timeout' => 10,
+            'user-agent' => $agent,
+            'headers' => ['Authorization' => 'Bearer ' . $access],
+        ])), true);
+        wp_remote_post('https://discord.com/api/v10/oauth2/token/revoke', [
+            'timeout' => 5,
+            'user-agent' => $agent,
+            'body' => ['token' => $access, 'token_type_hint' => 'access_token', 'client_id' => $s['discord_application_id'], 'client_secret' => $s['discord_client_secret']],
+        ]);
+        $user_id = (string) ($me['id'] ?? '');
+        if (! ctype_digit($user_id)) {
+            return $this->page_url('erreur=discord');
+        }
+
+        // Membership is read on the server itself, with the bot: the person
+        // cannot claim it.
+        $member = Nyassobi_Membership::instance()->discord_request('GET', '/guilds/' . rawurlencode($s['discord_guild_id']) . '/members/' . $user_id);
+        $roles = (array) ($member['roles'] ?? []);
+        $is_member = in_array($s['discord_member_role_id'], $roles, true) || in_array($s['discord_board_role_id'] ?? '', $roles, true);
+
+        $key = bin2hex(random_bytes(24));
+        set_transient(self::SESSION_PREFIX . $key, [
+            'id' => $user_id,
+            'name' => sanitize_text_field((string) (($member['nick'] ?? '') ?: (($me['global_name'] ?? '') ?: ($me['username'] ?? '')))),
+            'member' => $is_member,
+        ], self::SESSION_SECONDS);
+
+        return $this->page_url('session=' . $key);
+    }
+
+    /** @return array{id:string,name:string,member:bool}|null */
+    private function session(string $key): ?array
+    {
+        if (! preg_match('/^[a-f0-9]{48}$/', $key)) {
+            return null;
+        }
+        $session = get_transient(self::SESSION_PREFIX . $key);
+
+        return is_array($session) ? $session : null;
+    }
+
+    /* ------------------------------------------------------------------
+     * GraphQL, for the site's Conventions page
+     * ------------------------------------------------------------------ */
+
+    public function register_graphql(): void
+    {
+        if (! function_exists('register_graphql_object_type')) {
+            return;
+        }
+        register_graphql_object_type('NyassobiConvention', [
+            'fields' => [
+                'id' => ['type' => ['non_null' => 'Int']],
+                'name' => ['type' => ['non_null' => 'String']],
+                'city' => ['type' => 'String'],
+                'dates' => ['type' => 'String'],
+                'startDate' => ['type' => 'String'],
+                'endDate' => ['type' => 'String'],
+                'needs' => ['type' => 'String', 'description' => 'les-deux | staff | animation'],
+                'open' => ['type' => 'Boolean'],
+            ],
+        ]);
+        register_graphql_field('RootQuery', 'nyassobiConventions', [
+            'type' => ['list_of' => 'NyassobiConvention'],
+            'description' => __('Conventions à venir où Nyassobi cherche du staff ou des animateurs.', 'nyassobi-wp-plugin'),
+            'resolve' => function (): array {
+                return array_map(function (int $id): array {
+                    $c = $this->convention($id);
+                    return ['id' => $id, 'name' => $c['name'], 'city' => $c['city'], 'dates' => $c['dates'], 'startDate' => $c['start'], 'endDate' => $c['end'], 'needs' => $c['needs'], 'open' => $c['open']];
+                }, $this->upcoming_ids());
+            },
+        ]);
+        register_graphql_field('RootQuery', 'nyassobiConventionsLoginUrl', [
+            'type' => 'String',
+            'description' => __('Adresse de connexion avec Discord, ou rien si elle n\'est pas configurée.', 'nyassobi-wp-plugin'),
+            'resolve' => fn (): ?string => $this->login_ready() ? rest_url(Nyassobi_Membership::REST_NAMESPACE . '/conventions/connexion') : null,
+        ]);
+
+        register_graphql_object_type('NyassobiConventionChoice', [
+            'fields' => [
+                'conventionId' => ['type' => ['non_null' => 'Int']],
+                'role' => ['type' => 'String'],
+                'travel' => ['type' => 'String'],
+                'transport' => ['type' => 'String'],
+            ],
+        ]);
+        register_graphql_object_type('NyassobiConventionSession', [
+            'fields' => [
+                'name' => ['type' => 'String'],
+                'member' => ['type' => ['non_null' => 'Boolean']],
+                'choices' => ['type' => ['list_of' => 'NyassobiConventionChoice']],
+                'animation' => ['type' => 'String'],
+                'comment' => ['type' => 'String'],
+            ],
+        ]);
+        register_graphql_field('RootQuery', 'nyassobiConventionSession', [
+            'type' => 'NyassobiConventionSession',
+            'args' => ['session' => ['type' => ['non_null' => 'String']]],
+            'resolve' => function ($root, array $args): ?array {
+                $session = $this->session((string) ($args['session'] ?? ''));
+                if (null === $session) {
+                    return null;
+                }
+                $rid = $session['member'] ? $this->response_id($session['id']) : 0;
+                $choices = [];
+                foreach ($rid ? $this->choices($rid) : [] as $cid => $choice) {
+                    if ($this->is_upcoming((int) $cid)) {
+                        $choices[] = ['conventionId' => (int) $cid] + $choice;
+                    }
+                }
+
+                return [
+                    'name' => $session['name'],
+                    'member' => (bool) $session['member'],
+                    'choices' => $choices,
+                    'animation' => $rid ? $this->meta($rid, self::META_ANIMATION) : '',
+                    'comment' => $rid ? $this->meta($rid, self::META_COMMENT) : '',
+                ];
+            },
+        ]);
+
+        if (! function_exists('register_graphql_mutation')) {
+            return;
+        }
+        register_graphql_input_type('NyassobiConventionChoiceInput', [
+            'fields' => [
+                'conventionId' => ['type' => ['non_null' => 'Int']],
+                'role' => ['type' => ['non_null' => 'String']],
+                'travel' => ['type' => ['non_null' => 'String']],
+                'transport' => ['type' => 'String'],
+            ],
+        ]);
+        register_graphql_mutation('submitNyassobiConventionResponse', [
+            'inputFields' => [
+                'session' => ['type' => ['non_null' => 'String']],
+                'choices' => ['type' => ['non_null' => ['list_of' => 'NyassobiConventionChoiceInput']]],
+                'animation' => ['type' => 'String'],
+                'comment' => ['type' => 'String'],
+            ],
+            'outputFields' => [
+                'success' => ['type' => ['non_null' => 'Boolean'], 'resolve' => static fn ($p): bool => (bool) ($p['success'] ?? false)],
+                'message' => ['type' => ['non_null' => 'String'], 'resolve' => static fn ($p): string => (string) ($p['message'] ?? '')],
+            ],
+            'mutateAndGetPayload' => function (array $input): array {
+                $session = $this->session((string) ($input['session'] ?? ''));
+                if (null === $session) {
+                    return ['success' => false, 'message' => __('Ta connexion a expiré : reconnecte-toi avec Discord.', 'nyassobi-wp-plugin')];
+                }
+                if (! $session['member']) {
+                    return ['success' => false, 'message' => __('Ce formulaire est réservé aux adhérents.', 'nyassobi-wp-plugin')];
+                }
+                $error = $this->save_response($session, (array) ($input['choices'] ?? []), (string) ($input['animation'] ?? ''), (string) ($input['comment'] ?? ''));
+                if (null !== $error) {
+                    return ['success' => false, 'message' => $error];
+                }
+
+                return ['success' => true, 'message' => [] === (array) ($input['choices'] ?? [])
+                    ? __('Ta réponse est retirée. Merci de nous avoir prévenus !', 'nyassobi-wp-plugin')
+                    : __('C\'est noté, merci ! Le CA te recontacte sur Discord. Tu peux modifier ta réponse ici jusqu\'à la convention.', 'nyassobi-wp-plugin')];
+            },
+        ]);
+    }
+
+    /* ------------------------------------------------------------------
+     * WordPress admin
+     * ------------------------------------------------------------------ */
+
+    public function register_metaboxes(): void
+    {
+        add_meta_box('nyassobi_conv_details', __('Dates et besoins', 'nyassobi-wp-plugin'), [$this, 'render_details'], self::POST_TYPE, 'normal', 'high');
+        add_meta_box('nyassobi_conv_volunteers', __('Volontaires', 'nyassobi-wp-plugin'), [$this, 'render_volunteers'], self::POST_TYPE, 'normal');
+    }
+
+    public function render_details(\WP_Post $post): void
+    {
+        $c = $this->convention($post->ID);
+        $is_new = '' === $c['start'];
+        wp_nonce_field('nyassobi_conv_save', 'nyassobi_conv_nonce');
+        echo '<table class="form-table" role="presentation"><tbody>';
+        printf('<tr><th scope="row"><label for="nyassobi_conv_debut">%s</label></th><td><input type="date" id="nyassobi_conv_debut" name="nyassobi_conv_debut" value="%s" required></td></tr>', esc_html__('Premier jour', 'nyassobi-wp-plugin'), esc_attr($c['start']));
+        printf('<tr><th scope="row"><label for="nyassobi_conv_fin">%s</label></th><td><input type="date" id="nyassobi_conv_fin" name="nyassobi_conv_fin" value="%s"> <span class="description">%s</span></td></tr>', esc_html__('Dernier jour', 'nyassobi-wp-plugin'), esc_attr($is_new ? '' : $c['end']), esc_html__('Vide pour une seule journée.', 'nyassobi-wp-plugin'));
+        printf('<tr><th scope="row"><label for="nyassobi_conv_ville">%s</label></th><td><input type="text" id="nyassobi_conv_ville" name="nyassobi_conv_ville" value="%s" class="regular-text" maxlength="80"></td></tr>', esc_html__('Ville', 'nyassobi-wp-plugin'), esc_attr($c['city']));
+        echo '<tr><th scope="row"><label for="nyassobi_conv_besoins">' . esc_html__('On cherche', 'nyassobi-wp-plugin') . '</label></th><td><select id="nyassobi_conv_besoins" name="nyassobi_conv_besoins">';
+        foreach (self::NEEDS as $value => $label) {
+            printf('<option value="%s"%s>%s</option>', esc_attr($value), selected($c['needs'], $value, false), esc_html($label));
+        }
+        echo '</select></td></tr>';
+        printf('<tr><th scope="row">%s</th><td><label><input type="checkbox" name="nyassobi_conv_ouverte" value="1"%s> %s</label></td></tr>', esc_html__('Inscriptions', 'nyassobi-wp-plugin'), checked($is_new || $c['open'], true, false), esc_html__('Ouvertes (décocher quand l\'équipe est complète)', 'nyassobi-wp-plugin'));
+        echo '</tbody></table>';
+    }
+
+    public function render_volunteers(\WP_Post $post): void
+    {
+        $people = $this->volunteers($post->ID);
+        if (! $people) {
+            echo '<p>' . esc_html__('Pas encore de volontaire.', 'nyassobi-wp-plugin') . '</p>';
+            return;
+        }
+        echo '<table class="widefat striped"><thead><tr>';
+        foreach ([__('Pseudo', 'nyassobi-wp-plugin'), __('Rôle', 'nyassobi-wp-plugin'), __('Trajet', 'nyassobi-wp-plugin'), __('Transport', 'nyassobi-wp-plugin'), __('Animation proposée', 'nyassobi-wp-plugin'), __('Commentaire', 'nyassobi-wp-plugin')] as $label) {
+            echo '<th>' . esc_html($label) . '</th>';
+        }
+        echo '</tr></thead><tbody>';
+        foreach ($people as $p) {
+            printf('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>', esc_html($p['name']), esc_html(self::ROLES[$p['role']] ?? $p['role']), esc_html(self::TRAVEL[$p['travel']] ?? $p['travel']), esc_html($p['transport']), 'staff' !== $p['role'] ? esc_html($p['animation']) : '', esc_html($p['comment']));
+        }
+        echo '</tbody></table>';
+        printf('<p><a class="button" href="%s">%s</a></p>', esc_url(wp_nonce_url(admin_url('admin-post.php?action=nyassobi_conventions_export&convention=' . $post->ID), 'nyassobi_conv_export_' . $post->ID)), esc_html__('Exporter pour Excel', 'nyassobi-wp-plugin'));
+    }
+
+    public function save_convention(int $post_id, \WP_Post $post): void
+    {
+        if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE || ! isset($_POST['nyassobi_conv_nonce']) || ! wp_verify_nonce((string) $_POST['nyassobi_conv_nonce'], 'nyassobi_conv_save') || ! current_user_can(Nyassobi_Membership::CAP_ADHESIONS)) {
+            return;
+        }
+        $start = self::parse_date((string) wp_unslash($_POST['nyassobi_conv_debut'] ?? '')) ?? '';
+        $end = self::parse_date((string) wp_unslash($_POST['nyassobi_conv_fin'] ?? '')) ?? $start;
+        update_post_meta($post_id, self::META_START, $start);
+        update_post_meta($post_id, self::META_END, max($start, $end));
+        update_post_meta($post_id, self::META_CITY, mb_substr(sanitize_text_field((string) wp_unslash($_POST['nyassobi_conv_ville'] ?? '')), 0, 80));
+        $needs = (string) ($_POST['nyassobi_conv_besoins'] ?? '');
+        update_post_meta($post_id, self::META_NEEDS, isset(self::NEEDS[$needs]) ? $needs : 'les-deux');
+        update_post_meta($post_id, self::META_OPEN, empty($_POST['nyassobi_conv_ouverte']) ? '0' : '1');
+        if ('publish' === $post->post_status) {
+            $this->update_recap($post_id);
+        }
+    }
+
+    /** @param array<string,string> $columns */
+    public function admin_columns(array $columns): array
+    {
+        return ['cb' => $columns['cb'] ?? '', 'title' => __('Convention', 'nyassobi-wp-plugin'), 'nyassobi_dates' => __('Dates', 'nyassobi-wp-plugin'), 'nyassobi_ville' => __('Ville', 'nyassobi-wp-plugin'), 'nyassobi_volontaires' => __('Volontaires', 'nyassobi-wp-plugin'), 'nyassobi_etat' => __('Inscriptions', 'nyassobi-wp-plugin')];
+    }
+
+    public function render_admin_column(string $column, int $post_id): void
+    {
+        $c = $this->convention($post_id);
+        $values = [
+            'nyassobi_dates' => $c['dates'],
+            'nyassobi_ville' => $c['city'],
+            'nyassobi_volontaires' => (string) count($this->volunteers($post_id)),
+            'nyassobi_etat' => $c['open'] ? __('ouvertes', 'nyassobi-wp-plugin') : __('fermées', 'nyassobi-wp-plugin'),
+        ];
+        echo esc_html($values[$column] ?? '');
+    }
+
+    /** The commands are installed once, from the conventions list. */
+    public function commands_notice(): void
+    {
+        $screen = function_exists('get_current_screen') ? get_current_screen() : null;
+        if (! $screen || 'edit-' . self::POST_TYPE !== $screen->id || ! current_user_can(Nyassobi_Membership::CAP_ADHESIONS)) {
+            return;
+        }
+        if (isset($_GET['nyassobi_commandes'])) {
+            $ok = '1' === $_GET['nyassobi_commandes'];
+            printf('<div class="notice notice-%s is-dismissible"><p>%s</p></div>', $ok ? 'success' : 'error', esc_html($ok ? __('Commandes installées sur le serveur Discord : tapez /convention dans un salon.', 'nyassobi-wp-plugin') : __('Discord a refusé l\'installation : vérifiez l\'ID de l\'application et du serveur dans Adhésions > Réglages.', 'nyassobi-wp-plugin')));
+        }
+        $s = $this->settings();
+        $missing = '' === ($s['conventions_channel_id'] ?? '') ? __('Renseignez le salon des orgas dans Adhésions > Réglages pour recevoir les récapitulatifs. ', 'nyassobi-wp-plugin') : '';
+        printf(
+            '<div class="notice notice-info"><p>%s%s <a class="button" href="%s">%s</a></p></div>',
+            esc_html($missing),
+            esc_html__('Les membres du CA peuvent aussi gérer les conventions depuis Discord.', 'nyassobi-wp-plugin'),
+            esc_url(wp_nonce_url(admin_url('admin-post.php?action=nyassobi_conventions_commands'), 'nyassobi_conv_commands')),
+            esc_html__('Installer ou mettre à jour les commandes Discord', 'nyassobi-wp-plugin')
+        );
+    }
+
+    public function handle_install_commands(): void
+    {
+        if (! current_user_can(Nyassobi_Membership::CAP_ADHESIONS) || ! check_admin_referer('nyassobi_conv_commands')) {
+            wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
+        }
+        wp_safe_redirect(add_query_arg('nyassobi_commandes', $this->install_commands() ? '1' : '0', admin_url('edit.php?post_type=' . self::POST_TYPE)));
+        exit;
+    }
+
+    public function export(): void
+    {
+        $id = (int) ($_GET['convention'] ?? 0);
+        if (! current_user_can(Nyassobi_Membership::CAP_ADHESIONS) || ! check_admin_referer('nyassobi_conv_export_' . $id) || self::POST_TYPE !== get_post_type($id)) {
+            wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
+        }
+        $rows = [['Pseudo', 'Rôle', 'Trajet', 'Transport', 'Animation proposée', 'Commentaire']];
+        foreach ($this->volunteers($id) as $p) {
+            $rows[] = [$p['name'], self::ROLES[$p['role']] ?? $p['role'], self::TRAVEL[$p['travel']] ?? $p['travel'], $p['transport'], 'staff' !== $p['role'] ? $p['animation'] : '', $p['comment']];
+        }
+        nocache_headers();
+        header('Content-Type: text/csv; charset=UTF-8');
+        header('Content-Disposition: attachment; filename="volontaires-' . sanitize_file_name(get_the_title($id)) . '.csv"');
+        $out = fopen('php://output', 'w');
+        fwrite($out, "\xEF\xBB\xBF");
+        foreach ($rows as $row) {
+            // A cell starting with = + - @ would be run as a formula by Excel.
+            $row = array_map(static fn (string $cell): string => preg_match('/^[=+\-@]/', $cell) ? "'" . $cell : $cell, $row);
+            fputcsv($out, $row, ';', '"', '\\', "\r\n");
+        }
+        fclose($out);
+        exit;
+    }
+
+    /* ------------------------------------------------------------------
+     * Erasure
+     * ------------------------------------------------------------------ */
+
+    /** A deleted convention takes its Discord recap and its answers with it. */
+    public function on_delete(int $post_id): void
+    {
+        if (self::POST_TYPE !== get_post_type($post_id)) {
+            return;
+        }
+        $channel = (string) ($this->settings()['conventions_channel_id'] ?? '');
+        $message = $this->meta($post_id, self::META_MESSAGE);
+        if ('' !== $channel && '' !== $message) {
+            Nyassobi_Membership::instance()->discord_request('DELETE', '/channels/' . rawurlencode($channel) . '/messages/' . rawurlencode($message));
+        }
+        foreach (get_posts(['post_type' => self::RESPONSE_TYPE, 'post_status' => 'any', 'fields' => 'ids', 'posts_per_page' => -1]) as $rid) {
+            $choices = $this->choices((int) $rid);
+            if (! isset($choices[$post_id])) {
+                continue;
+            }
+            unset($choices[$post_id]);
+            if ($choices) {
+                update_post_meta((int) $rid, self::META_CHOICES, $choices);
+            } else {
+                wp_delete_post((int) $rid, true);
+            }
+        }
+    }
+
+    /** Daily: everything about a convention goes 30 days after it ends. */
+    public function purge(): void
+    {
+        $ids = get_posts([
+            'post_type' => self::POST_TYPE,
+            'post_status' => 'any',
+            'fields' => 'ids',
+            'posts_per_page' => 50,
+            'meta_query' => [['key' => self::META_END, 'value' => wp_date('Y-m-d', time() - self::RETENTION_DAYS * DAY_IN_SECONDS), 'compare' => '<']],
+        ]);
+        foreach ($ids as $id) {
+            wp_delete_post((int) $id, true);
+        }
+    }
+}
