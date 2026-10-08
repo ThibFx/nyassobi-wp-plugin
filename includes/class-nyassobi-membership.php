@@ -41,6 +41,8 @@ final class Nyassobi_Membership
     private const CUSTOM_ID_PREFIX = 'nyassobi_vote';
     private const DECIDED_HOOK = 'nyassobi_membership_decided';
     public const PURGE_HOOK = 'nyassobi_membership_purge';
+    private const MAIL_RETRY_HOOK = 'nyassobi_mail_retry';
+    private const MAIL_ATTEMPTS = 3;
     private const PENDING_EXPIRY_DAYS = 90;
     private const SUBMISSIONS_PER_HOUR = 3;
 
@@ -119,6 +121,7 @@ final class Nyassobi_Membership
         add_action('rest_api_init', [$this, 'register_rest_routes']);
         add_action(self::DECIDED_HOOK, [$this, 'notify_decision']);
         add_action(self::PURGE_HOOK, [$this, 'purge_expired']);
+        add_action(self::MAIL_RETRY_HOOK, [$this, 'retry_mail'], 10, 5);
         add_filter('pre_trash_post', [$this, 'delete_instead_of_trash'], 10, 2);
     }
 
@@ -1561,6 +1564,46 @@ final class Nyassobi_Membership
         if (! is_email($to)) {
             return;
         }
+        // A mail server can refuse a connection for a few seconds (network
+        // hiccup): one quick second try, then later ones, rather than an
+        // email lost without a trace.
+        if ($this->deliver_mail($to, $subject, $lines, $reply_to_contact)) {
+            return;
+        }
+        sleep(2);
+        if (! $this->deliver_mail($to, $subject, $lines, $reply_to_contact)) {
+            $this->schedule_mail_retry($to, $subject, $lines, $reply_to_contact, 2);
+        }
+    }
+
+    /**
+     * @param string[] $lines
+     */
+    public function retry_mail(string $to, string $subject, array $lines, bool $reply_to_contact, int $attempt): void
+    {
+        if (! $this->deliver_mail($to, $subject, $lines, $reply_to_contact)) {
+            $this->schedule_mail_retry($to, $subject, $lines, $reply_to_contact, $attempt + 1);
+        }
+    }
+
+    /**
+     * @param string[] $lines
+     */
+    private function schedule_mail_retry(string $to, string $subject, array $lines, bool $reply_to_contact, int $attempt): void
+    {
+        if ($attempt > self::MAIL_ATTEMPTS) {
+            error_log(sprintf('[Nyassobi] E-mail « %s » abandonné après %d essais.', $subject, self::MAIL_ATTEMPTS + 1));
+            return;
+        }
+        error_log(sprintf('[Nyassobi] E-mail « %s » non parti, nouvel essai dans %d minutes.', $subject, 10 * $attempt));
+        wp_schedule_single_event(time() + 10 * $attempt * MINUTE_IN_SECONDS, self::MAIL_RETRY_HOOK, [$to, $subject, $lines, $reply_to_contact, $attempt]);
+    }
+
+    /**
+     * @param string[] $lines
+     */
+    private function deliver_mail(string $to, string $subject, array $lines, bool $reply_to_contact): bool
+    {
         $headers = ['Content-Type: text/plain; charset=UTF-8'];
         $settings = self::get_settings();
         // An address of the association's own domain passes the SPF check of
@@ -1573,7 +1616,7 @@ final class Nyassobi_Membership
         if ($reply_to_contact && is_email($main['contact_email'] ?? '')) {
             $headers[] = 'Reply-To: Nyassobi <' . $main['contact_email'] . '>';
         }
-        wp_mail($to, $subject, implode("\n", $lines), $headers);
+        return (bool) wp_mail($to, $subject, implode("\n", $lines), $headers);
     }
 
     public function schedule_purge(): void

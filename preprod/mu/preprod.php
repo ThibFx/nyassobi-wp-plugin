@@ -103,3 +103,24 @@ add_action('admin_notices', static function (): void {
         $lignes // phpcs:ignore WordPress.Security.EscapeOutput -- échappé ci-dessus.
     );
 });
+
+/*
+ * Journal des envois (destinataire, objet, résultat ; jamais le contenu) :
+ * sans lui, un e-mail qui n'arrive pas ne laisse aucune trace côté serveur.
+ */
+const PREPROD_ENVOIS = 'preprod_mails_envoyes';
+$preprod_noter = static function (string $resultat, array $atts): void {
+    $journal = (array) get_option(PREPROD_ENVOIS, []);
+    array_unshift($journal, [
+        'date' => current_time('mysql'),
+        'a' => implode(', ', (array) $atts['to']),
+        'objet' => (string) $atts['subject'],
+        'resultat' => $resultat,
+    ]);
+    update_option(PREPROD_ENVOIS, array_slice($journal, 0, 100), false);
+};
+add_action('wp_mail_succeeded', static fn (array $atts) => $preprod_noter('envoyé', $atts));
+add_action('wp_mail_failed', static function (\WP_Error $erreur) use ($preprod_noter): void {
+    $data = (array) $erreur->get_error_data();
+    $preprod_noter('ÉCHEC : ' . $erreur->get_error_message(), ['to' => $data['to'] ?? [], 'subject' => $data['subject'] ?? '']);
+});
