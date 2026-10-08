@@ -34,6 +34,13 @@ final class Nyassobi_Conventions
     private const META_NEEDS = '_nyassobi_conv_besoins';
     private const META_OPEN = '_nyassobi_conv_ouverte';
     private const META_MESSAGE = '_nyassobi_conv_message';
+    /** Added by the CA: shown to members (site, public table)… */
+    private const META_DESCRIPTION = '_nyassobi_conv_description';
+    private const META_LINK = '_nyassobi_conv_lien';
+    private const META_IMAGES = '_nyassobi_conv_images';
+    private const META_NEWS = '_nyassobi_conv_annonces';
+    /** …or kept for the CA only (organisers' recap). */
+    private const META_NOTES = '_nyassobi_conv_notes';
 
     private const META_DISCORD_ID = '_nyassobi_conv_discord_id';
     private const META_NAME = '_nyassobi_conv_pseudo';
@@ -66,7 +73,19 @@ final class Nyassobi_Conventions
         'plus' => 'plus de 4 h',
     ];
 
-    private const COMMANDS = ['convention-ajouter', 'convention-fermer', 'convention-rouvrir', 'convention-liste'];
+    private const COMMANDS = ['convention-ajouter', 'convention-fermer', 'convention-rouvrir', 'convention-liste', 'convention-infos', 'convention-annonce', 'convention-note'];
+
+    /** CA's decision on a volunteer, never shown to them. */
+    public const STATUSES = [
+        'retenu' => '✅ Retenu·e',
+        'attente' => '⏳ En attente',
+        'non' => '❌ Pas retenu·e',
+    ];
+    private const MAX_IMAGES = 6;
+    private const IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+    private const IMAGE_TYPES = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif'];
+    /** Images sent on Discord are downloaded after the 3-second answer Discord expects. */
+    private const ATTACHMENT_HOOK = 'nyassobi_conv_attachment';
 
     /** @var self|null */
     private static $instance = null;
@@ -104,6 +123,13 @@ final class Nyassobi_Conventions
         add_action('graphql_register_types', [$this, 'register_graphql']);
         add_filter('nyassobi_discord_command', [$this, 'handle_command'], 10, 2);
         add_action(Nyassobi_Membership::PURGE_HOOK, [$this, 'purge']);
+        add_action(self::ATTACHMENT_HOOK, [$this, 'finish_command'], 10, 3);
+        // File inputs on the convention screen need a multipart form.
+        add_action('post_edit_form_tag', static function (\WP_Post $post): void {
+            if (self::POST_TYPE === $post->post_type) {
+                echo ' enctype="multipart/form-data"';
+            }
+        });
     }
 
     /** @return array<string,string> */
@@ -430,6 +456,11 @@ final class Nyassobi_Conventions
             update_post_meta($response_id, self::META_COMMENT, $comment);
         }
 
+        foreach (array_diff(array_keys($before), array_keys($choices)) as $cid) {
+            $notes = $this->notes((int) $cid);
+            unset($notes[$discord_id]);
+            update_post_meta((int) $cid, self::META_NOTES, $notes);
+        }
         foreach (array_unique(array_merge(array_keys($before), array_keys($choices))) as $cid) {
             $this->update_recap((int) $cid);
         }
@@ -452,19 +483,24 @@ final class Nyassobi_Conventions
 
         $staff = count(array_filter($people, static fn ($p) => 'animation' !== $p['role']));
         $anim = count(array_filter($people, static fn ($p) => 'staff' !== $p['role']));
-        $head = sprintf("📅 %s%s · Besoin : %s\n**%d volontaire%s** · staff : %d · animation : %d",
+        $notes = $this->notes($id);
+        $kept = count(array_filter($people, static fn ($p) => 'retenu' === ($notes[$p['discord_id']]['status'] ?? '')));
+        $head = sprintf("📅 %s%s · Besoin : %s\n**%d volontaire%s** · staff : %d · animation : %d · retenus : %d",
             $c['dates'],
             '' !== $c['city'] ? ' · 📍 ' . $md($c['city']) : '',
             mb_strtolower(self::NEEDS[$c['needs']]),
             count($people),
             count($people) > 1 ? 's' : '',
             $staff,
-            $anim
+            $anim,
+            $kept
         );
 
         $blocks = [];
         foreach ($people as $p) {
-            $block = sprintf('**%s** <@%s> · %s · 🚗 %s%s',
+            $note = $notes[$p['discord_id']] ?? [];
+            $block = sprintf('%s**%s** <@%s> · %s · 🚗 %s%s',
+                isset(self::STATUSES[$note['status'] ?? '']) ? mb_substr(self::STATUSES[$note['status']], 0, 1) . ' ' : '',
                 $md($p['name']),
                 $p['discord_id'],
                 self::ROLES[$p['role']] ?? $p['role'],
@@ -476,6 +512,9 @@ final class Nyassobi_Conventions
             }
             if ('' !== $p['comment']) {
                 $block .= "\n> 💬 " . str_replace("\n", ' ', $md($short($p['comment'], 300)));
+            }
+            if ('' !== ($note['note'] ?? '')) {
+                $block .= "\n> 📝 CA : " . str_replace("\n", ' ', $md($short($note['note'], 300)));
             }
             $blocks[] = $block;
         }
@@ -557,31 +596,25 @@ final class Nyassobi_Conventions
                 $counts[] = '🎤 Animation : ' . count(array_filter($people, static fn ($p) => 'animation' === $p['role']));
             }
             $counts[] = $c['open'] ? '✅ Inscriptions ouvertes' : '🔒 Équipe complète';
+            if ('' !== $this->meta($id, self::META_LINK)) {
+                $counts[] = '🔗 [Site de la convention](' . $this->meta($id, self::META_LINK) . ')';
+            }
             $any_open = $any_open || $c['open'];
-            $lines[] = sprintf("**%s** · %s%s
-%s", $md($c['name']), $c['dates'], '' !== $c['city'] ? ' · ' . $md($c['city']) : '', implode(' · ', $counts));
+            $lines[] = sprintf("**%s** · %s%s\n%s", $md($c['name']), $c['dates'], '' !== $c['city'] ? ' · ' . $md($c['city']) : '', implode(' · ', $counts));
         }
 
         $body = '';
         foreach ($lines as $i => $line) {
-            if (mb_strlen($body . "
-
-" . $line) > 3700) {
-                $body .= sprintf("
-
-… et %d autre(s) convention(s).", count($lines) - $i);
+            if (mb_strlen($body . "\n\n" . $line) > 3700) {
+                $body .= sprintf("\n\n… et %d autre(s) convention(s).", count($lines) - $i);
                 break;
             }
-            $body .= ('' === $body ? '' : "
-
-") . $line;
+            $body .= ('' === $body ? '' : "\n\n") . $line;
         }
         if ('' === $body) {
             $body = 'Aucune convention à venir pour le moment.';
         } elseif ($any_open) {
-            $body .= "
-
-Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $this->page_url();
+            $body .= "\n\nTu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $this->page_url();
         }
 
         return [
@@ -642,6 +675,33 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
             ['name' => 'convention-fermer', 'description' => 'Équipe complète : ne plus accepter de volontaires', 'options' => $convention],
             ['name' => 'convention-rouvrir', 'description' => 'Accepter à nouveau des volontaires', 'options' => $convention],
             ['name' => 'convention-liste', 'description' => 'Les conventions à venir et leurs volontaires'],
+            [
+                'name' => 'convention-infos',
+                'description' => 'Infos visibles des adhérents : description, lien, affiche ou photos',
+                'options' => array_merge($convention, [
+                    ['type' => 3, 'name' => 'texte', 'description' => 'Description (remplace la précédente ; « - » pour l\'effacer)', 'required' => false, 'max_length' => 2000],
+                    ['type' => 3, 'name' => 'lien', 'description' => 'Site de la convention (« - » pour l\'effacer)', 'required' => false, 'max_length' => 300],
+                    ['type' => 11, 'name' => 'image', 'description' => 'Affiche ou photo à ajouter', 'required' => false],
+                    ['type' => 5, 'name' => 'retirer-images', 'description' => 'Retirer toutes les images', 'required' => false],
+                ]),
+            ],
+            [
+                'name' => 'convention-annonce',
+                'description' => 'Publier une annonce pour les adhérents (page du site et salon public)',
+                'options' => array_merge($convention, [
+                    ['type' => 3, 'name' => 'texte', 'description' => 'L\'annonce', 'required' => true, 'max_length' => 1500],
+                    ['type' => 11, 'name' => 'image', 'description' => 'Image jointe', 'required' => false],
+                ]),
+            ],
+            [
+                'name' => 'convention-note',
+                'description' => 'Statut et note du CA sur un volontaire (visible du CA seulement)',
+                'options' => array_merge($convention, [
+                    ['type' => 6, 'name' => 'personne', 'description' => 'Le volontaire', 'required' => true],
+                    ['type' => 3, 'name' => 'statut', 'description' => 'Décision', 'required' => false, 'choices' => array_map(static fn ($v, $l) => ['name' => $l, 'value' => $v], array_keys(self::STATUSES), self::STATUSES)],
+                    ['type' => 3, 'name' => 'note', 'description' => 'Note (« - » pour l\'effacer)', 'required' => false, 'max_length' => 300],
+                ]),
+            ],
         ];
     }
 
@@ -687,11 +747,11 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
 
         // Type 4: suggest conventions while the name is being typed.
         if (4 === (int) ($payload['type'] ?? 0)) {
-            $want_open = 'convention-fermer' === $name;
+            $want_open = ['convention-fermer' => true, 'convention-rouvrir' => false][$name] ?? null;
             $choices = [];
             foreach ($this->upcoming_ids() as $id) {
                 $c = $this->convention($id);
-                if ($c['open'] === $want_open && ('' === $focused || false !== mb_stripos($c['name'], $focused))) {
+                if ((null === $want_open || $c['open'] === $want_open) && ('' === $focused || false !== mb_stripos($c['name'], $focused))) {
                     $choices[] = ['name' => mb_substr($c['name'] . ' · ' . $c['dates'], 0, 100), 'value' => (string) $id];
                 }
             }
@@ -718,6 +778,26 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
                 $this->set_open($id, $open);
                 return $membership->ephemeral(sprintf($open ? __('%s accepte à nouveau des volontaires.', 'nyassobi-wp-plugin') : __('%s : inscriptions fermées. Les volontaires déjà inscrits restent dans le récapitulatif.', 'nyassobi-wp-plugin'), $this->convention($id)['name']));
 
+            case 'convention-infos':
+            case 'convention-annonce':
+            case 'convention-note':
+                $id = (int) ($options['convention'] ?? 0);
+                if (! $this->is_upcoming($id)) {
+                    return $membership->ephemeral(__('Convention introuvable : choisis-la dans la liste proposée.', 'nyassobi-wp-plugin'));
+                }
+                $attachment = $payload['data']['resolved']['attachments'][$options['image'] ?? ''] ?? null;
+                if (is_array($attachment)) {
+                    // Downloading an image can take longer than Discord waits:
+                    // answer "thinking…" now, finish in the background.
+                    $token = (string) ($payload['token'] ?? '');
+                    wp_schedule_single_event(time(), self::ATTACHMENT_HOOK, [$name, $options + ['_attachment' => wp_json_encode(array_intersect_key($attachment, array_flip(['url', 'filename', 'size', 'content_type'])))], $token]);
+                    spawn_cron();
+
+                    return new \WP_REST_Response(['type' => 5, 'data' => ['flags' => 64]], 200);
+                }
+
+                return $membership->ephemeral($this->run_ca_command($name, $id, $options, null));
+
             default:
                 $lines = [];
                 foreach ($this->upcoming_ids() as $id) {
@@ -726,6 +806,308 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
                 }
                 return $membership->ephemeral($lines ? mb_substr(implode("\n", $lines), 0, 1900) : __('Aucune convention à venir.', 'nyassobi-wp-plugin'));
         }
+    }
+
+    /**
+     * The three CA commands that add content. Shared by the immediate answer
+     * and by finish_command() when an image had to be downloaded first.
+     *
+     * @param array<string,string>               $options
+     * @param array{bytes:string,name:string}|null $image
+     */
+    private function run_ca_command(string $name, int $id, array $options, ?array $image): string
+    {
+        $c = $this->convention($id);
+        $image_id = 0;
+        if (null !== $image) {
+            $stored = $this->store_image($id, $image['bytes'], $image['name']);
+            if (is_string($stored)) {
+                return $stored;
+            }
+            $image_id = $stored;
+        }
+
+        if ('convention-note' === $name) {
+            $error = $this->set_note($id, (string) ($options['personne'] ?? ''), $options['statut'] ?? null, $options['note'] ?? null);
+
+            return $error ?? sprintf(__('Note enregistrée pour %s, visible dans le récapitulatif des orgas.', 'nyassobi-wp-plugin'), $c['name']);
+        }
+        if ('convention-annonce' === $name) {
+            $error = $this->add_news($id, (string) ($options['texte'] ?? ''), $image_id);
+
+            return $error ?? sprintf(__('Annonce publiée pour %s : sur la page Conventions du site et dans le salon public.', 'nyassobi-wp-plugin'), $c['name']);
+        }
+
+        $error = $this->set_info($id, $options['texte'] ?? null, $options['lien'] ?? null, $image_id ? [$image_id] : [], ! empty($options['retirer-images']) && 'false' !== $options['retirer-images']);
+
+        return $error ?? sprintf(__('Infos de %s mises à jour sur la page Conventions du site.', 'nyassobi-wp-plugin'), $c['name']);
+    }
+
+    /**
+     * Background part of a command with an image: download it from Discord,
+     * then replace Discord's "thinking…" with the result.
+     *
+     * @param array<string,string> $options
+     */
+    public function finish_command(string $name, array $options, string $token): void
+    {
+        $attachment = json_decode((string) ($options['_attachment'] ?? ''), true);
+        unset($options['_attachment']);
+        $id = (int) ($options['convention'] ?? 0);
+        $image = is_array($attachment) ? $this->fetch_attachment($attachment) : __('Image illisible.', 'nyassobi-wp-plugin');
+        $result = ! $this->is_upcoming($id)
+            ? __('Convention introuvable.', 'nyassobi-wp-plugin')
+            : (is_string($image) ? $image : $this->run_ca_command($name, $id, $options, $image));
+
+        $app = (string) ($this->settings()['discord_application_id'] ?? '');
+        if ('' !== $app && preg_match('/^[A-Za-z0-9._-]+$/', $token)) {
+            wp_remote_request('https://discord.com/api/v10/webhooks/' . rawurlencode($app) . '/' . $token . '/messages/@original', [
+                'method' => 'PATCH',
+                'timeout' => 10,
+                'user-agent' => 'DiscordBot (https://nyassobi.fr, 1.0)',
+                'headers' => ['Content-Type' => 'application/json'],
+                'body' => wp_json_encode(['content' => $result, 'allowed_mentions' => ['parse' => []]]),
+            ]);
+        }
+    }
+
+    /* ------------------------------------------------------------------
+     * What the CA adds: infos, images, announcements, notes
+     * ------------------------------------------------------------------ */
+
+    /** @return array<string,array{status:string,note:string}> */
+    private function notes(int $id): array
+    {
+        $notes = get_post_meta($id, self::META_NOTES, true);
+
+        return is_array($notes) ? $notes : [];
+    }
+
+    /** @return int[] */
+    private function images(int $id): array
+    {
+        return array_values(array_filter(array_map('intval', (array) get_post_meta($id, self::META_IMAGES, true)), static fn (int $i): bool => $i > 0 && 'attachment' === get_post_type($i)));
+    }
+
+    /** @return array<int,array{id:string,date:int,text:string,image:int,message:string}> */
+    private function news(int $id): array
+    {
+        $news = get_post_meta($id, self::META_NEWS, true);
+
+        return is_array($news) ? array_values($news) : [];
+    }
+
+    private static function image_url(int $attachment): string
+    {
+        return (string) (wp_get_attachment_image_url($attachment, 'large') ?: wp_get_attachment_url($attachment));
+    }
+
+    /**
+     * Checks the bytes themselves (never the announced type), then files the
+     * image in the media library, attached to the convention.
+     *
+     * @return int|string Attachment id, or an error message.
+     */
+    private function store_image(int $convention_id, string $bytes, string $name)
+    {
+        if ('' === $bytes || strlen($bytes) > self::IMAGE_MAX_BYTES) {
+            return __('L\'image doit faire moins de 8 Mo.', 'nyassobi-wp-plugin');
+        }
+        $mime = (new \finfo(FILEINFO_MIME_TYPE))->buffer($bytes) ?: '';
+        if (! isset(self::IMAGE_TYPES[$mime])) {
+            return __('Seules les images JPEG, PNG, WebP ou GIF sont acceptées.', 'nyassobi-wp-plugin');
+        }
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        require_once ABSPATH . 'wp-admin/includes/media.php';
+        require_once ABSPATH . 'wp-admin/includes/image.php';
+        $tmp = wp_tempnam($name);
+        file_put_contents($tmp, $bytes);
+        $base = sanitize_file_name((string) pathinfo($name, PATHINFO_FILENAME)) ?: 'image';
+        $attachment = media_handle_sideload(['name' => $base . '.' . self::IMAGE_TYPES[$mime], 'tmp_name' => $tmp], $convention_id);
+        if (is_wp_error($attachment)) {
+            @unlink($tmp);
+            error_log('[Nyassobi] Conventions : image refusée (' . $attachment->get_error_message() . ').');
+            return __('L\'image n\'a pas pu être enregistrée.', 'nyassobi-wp-plugin');
+        }
+
+        return (int) $attachment;
+    }
+
+    /**
+     * Only Discord's own file servers are fetched: the address comes from a
+     * Discord payload, but must never make WordPress call anything else.
+     *
+     * @param array<string,mixed> $attachment
+     *
+     * @return array{bytes:string,name:string}|string
+     */
+    private function fetch_attachment(array $attachment)
+    {
+        $url = (string) ($attachment['url'] ?? '');
+        $host = (string) wp_parse_url($url, PHP_URL_HOST);
+        if ('https' !== wp_parse_url($url, PHP_URL_SCHEME) || ! in_array($host, ['cdn.discordapp.com', 'media.discordapp.net'], true)) {
+            return __('Image illisible.', 'nyassobi-wp-plugin');
+        }
+        if ((int) ($attachment['size'] ?? 0) > self::IMAGE_MAX_BYTES) {
+            return __('L\'image doit faire moins de 8 Mo.', 'nyassobi-wp-plugin');
+        }
+        $response = wp_remote_get($url, ['timeout' => 30, 'limit_response_size' => self::IMAGE_MAX_BYTES + 1, 'redirection' => 0]);
+        if (200 !== (int) wp_remote_retrieve_response_code($response)) {
+            return __('Discord n\'a pas fourni l\'image : réessaie.', 'nyassobi-wp-plugin');
+        }
+
+        return ['bytes' => (string) wp_remote_retrieve_body($response), 'name' => (string) ($attachment['filename'] ?? 'image')];
+    }
+
+    /**
+     * Infos shown to members. null leaves a field as it is; "-" clears it.
+     *
+     * @param int[] $add_images
+     */
+    public function set_info(int $id, ?string $description, ?string $link, array $add_images, bool $clear_images): ?string
+    {
+        if (null !== $description) {
+            $description = '-' === trim($description) ? '' : sanitize_textarea_field($description);
+            if (mb_strlen($description) > 2000) {
+                return __('La description doit tenir en 2 000 caractères.', 'nyassobi-wp-plugin');
+            }
+            update_post_meta($id, self::META_DESCRIPTION, $description);
+        }
+        if (null !== $link) {
+            $clear = '-' === trim($link) || '' === trim($link);
+            $clean = $clear ? '' : esc_url_raw(trim($link), ['http', 'https']);
+            if (! $clear && ! preg_match('#^https?://#', $clean)) {
+                return __('Ce lien ne semble pas valide : il doit commencer par https://', 'nyassobi-wp-plugin');
+            }
+            update_post_meta($id, self::META_LINK, $clean);
+        }
+        $images = $this->images($id);
+        if ($clear_images) {
+            foreach ($images as $image) {
+                wp_delete_attachment($image, true);
+            }
+            $images = [];
+        }
+        foreach ($add_images as $image) {
+            if (count($images) >= self::MAX_IMAGES) {
+                wp_delete_attachment($image, true);
+                return sprintf(__('%d images au plus : retire-en d\'abord.', 'nyassobi-wp-plugin'), self::MAX_IMAGES);
+            }
+            $images[] = $image;
+        }
+        update_post_meta($id, self::META_IMAGES, $images);
+        $this->update_summary();
+
+        return null;
+    }
+
+    /**
+     * Posts a message with an image file attached, so it shows even when the
+     * WordPress address is not reachable by Discord (test setup).
+     *
+     * @param array<string,mixed> $payload
+     *
+     * @return array<string,mixed>|null
+     */
+    private function discord_post_with_image(string $channel, array $payload, int $attachment): ?array
+    {
+        $path = '/channels/' . rawurlencode($channel) . '/messages';
+        $file = $attachment ? (string) get_attached_file($attachment) : '';
+        if ('' === $file || ! is_readable($file)) {
+            return Nyassobi_Membership::instance()->discord_request('POST', $path, $payload);
+        }
+        $name = sanitize_file_name(wp_basename($file));
+        $payload['attachments'] = [['id' => 0, 'filename' => $name]];
+        $payload['embeds'][0]['image'] = ['url' => 'attachment://' . $name];
+        $boundary = 'nyassobi' . bin2hex(random_bytes(8));
+        $body = "--$boundary\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n" . wp_json_encode($payload) . "\r\n"
+            . "--$boundary\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"$name\"\r\nContent-Type: " . (string) get_post_mime_type($attachment) . "\r\n\r\n" . (string) file_get_contents($file) . "\r\n--$boundary--\r\n";
+        $response = wp_remote_post('https://discord.com/api/v10' . $path, [
+            'timeout' => 20,
+            'user-agent' => 'DiscordBot (https://nyassobi.fr, 1.0)',
+            'headers' => ['Authorization' => 'Bot ' . ($this->settings()['discord_bot_token'] ?? ''), 'Content-Type' => 'multipart/form-data; boundary=' . $boundary],
+            'body' => $body,
+        ]);
+        $code = (int) wp_remote_retrieve_response_code($response);
+        if ($code < 200 || $code >= 300) {
+            error_log(sprintf('[Nyassobi] Discord a répondu %d sur %s (image)', $code, $path));
+            return null;
+        }
+        $decoded = json_decode((string) wp_remote_retrieve_body($response), true);
+
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    /** An announcement for members: on the site, and posted in the public channel. */
+    public function add_news(int $id, string $text, int $image): ?string
+    {
+        $text = sanitize_textarea_field($text);
+        if ('' === trim($text) && ! $image) {
+            return __('L\'annonce est vide.', 'nyassobi-wp-plugin');
+        }
+        if (mb_strlen($text) > 1500) {
+            return __('L\'annonce doit tenir en 1 500 caractères.', 'nyassobi-wp-plugin');
+        }
+        $item = ['id' => bin2hex(random_bytes(4)), 'date' => time(), 'text' => $text, 'image' => $image, 'message' => ''];
+        $channel = (string) ($this->settings()['conventions_summary_channel_id'] ?? '');
+        if ('' !== $channel) {
+            $c = $this->convention($id);
+            $posted = $this->discord_post_with_image($channel, [
+                'embeds' => [[
+                    'title' => '📣 ' . mb_substr($c['name'], 0, 200) . ' · ' . $c['dates'],
+                    'description' => Nyassobi_Membership::escape_markdown($text) . "\n\n" . $this->page_url(),
+                    'color' => 0x0F9D93,
+                ]],
+                'allowed_mentions' => ['parse' => []],
+            ], $image);
+            $item['message'] = (string) ($posted['id'] ?? '');
+        }
+        $news = $this->news($id);
+        $news[] = $item;
+        update_post_meta($id, self::META_NEWS, $news);
+
+        return null;
+    }
+
+    private function remove_news(int $id, string $news_id): void
+    {
+        $channel = (string) ($this->settings()['conventions_summary_channel_id'] ?? '');
+        $kept = [];
+        foreach ($this->news($id) as $item) {
+            if ($item['id'] !== $news_id) {
+                $kept[] = $item;
+                continue;
+            }
+            if ($item['image']) {
+                wp_delete_attachment((int) $item['image'], true);
+            }
+            if ('' !== $channel && '' !== $item['message']) {
+                Nyassobi_Membership::instance()->discord_request('DELETE', '/channels/' . rawurlencode($channel) . '/messages/' . rawurlencode($item['message']));
+            }
+        }
+        update_post_meta($id, self::META_NEWS, $kept);
+    }
+
+    /** CA only. null leaves a field as it is; "-" clears the note. */
+    public function set_note(int $id, string $discord_id, ?string $status, ?string $note): ?string
+    {
+        $known = array_column($this->volunteers($id), 'name', 'discord_id');
+        if (! isset($known[$discord_id])) {
+            return __('Cette personne ne s\'est pas proposée pour cette convention.', 'nyassobi-wp-plugin');
+        }
+        $notes = $this->notes($id);
+        $entry = $notes[$discord_id] ?? ['status' => '', 'note' => ''];
+        if (null !== $status && '' !== $status) {
+            $entry['status'] = isset(self::STATUSES[$status]) ? $status : '';
+        }
+        if (null !== $note) {
+            $entry['note'] = '-' === trim($note) ? '' : mb_substr(sanitize_text_field($note), 0, 300);
+        }
+        $notes[$discord_id] = $entry;
+        update_post_meta($id, self::META_NOTES, $notes);
+        $this->update_recap($id);
+
+        return null;
     }
 
     /* ------------------------------------------------------------------
@@ -857,8 +1239,19 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
         if (! function_exists('register_graphql_object_type')) {
             return;
         }
+        register_graphql_object_type('NyassobiConventionNews', [
+            'fields' => [
+                'date' => ['type' => 'String'],
+                'text' => ['type' => 'String'],
+                'image' => ['type' => 'String'],
+            ],
+        ]);
         register_graphql_object_type('NyassobiConvention', [
             'fields' => [
+                'description' => ['type' => 'String'],
+                'link' => ['type' => 'String'],
+                'images' => ['type' => ['list_of' => 'String']],
+                'news' => ['type' => ['list_of' => 'NyassobiConventionNews'], 'description' => __('Annonces du CA, la plus récente d\'abord.', 'nyassobi-wp-plugin')],
                 'id' => ['type' => ['non_null' => 'Int']],
                 'name' => ['type' => ['non_null' => 'String']],
                 'city' => ['type' => 'String'],
@@ -875,7 +1268,19 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
             'resolve' => function (): array {
                 return array_map(function (int $id): array {
                     $c = $this->convention($id);
-                    return ['id' => $id, 'name' => $c['name'], 'city' => $c['city'], 'dates' => $c['dates'], 'startDate' => $c['start'], 'endDate' => $c['end'], 'needs' => $c['needs'], 'open' => $c['open']];
+                    $news = array_map(static fn (array $n): array => [
+                        'date' => wp_date('j F Y', (int) $n['date']),
+                        'text' => $n['text'],
+                        'image' => $n['image'] ? self::image_url((int) $n['image']) : null,
+                    ], array_reverse($this->news($id)));
+
+                    return [
+                        'id' => $id, 'name' => $c['name'], 'city' => $c['city'], 'dates' => $c['dates'], 'startDate' => $c['start'], 'endDate' => $c['end'], 'needs' => $c['needs'], 'open' => $c['open'],
+                        'description' => $this->meta($id, self::META_DESCRIPTION),
+                        'link' => $this->meta($id, self::META_LINK),
+                        'images' => array_map([self::class, 'image_url'], $this->images($id)),
+                        'news' => $news,
+                    ];
                 }, $this->upcoming_ids());
             },
         ]);
@@ -977,6 +1382,8 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
     public function register_metaboxes(): void
     {
         add_meta_box('nyassobi_conv_details', __('Dates et besoins', 'nyassobi-wp-plugin'), [$this, 'render_details'], self::POST_TYPE, 'normal', 'high');
+        add_meta_box('nyassobi_conv_infos', __('Infos pour les adhérents', 'nyassobi-wp-plugin'), [$this, 'render_infos'], self::POST_TYPE, 'normal');
+        add_meta_box('nyassobi_conv_news', __('Annonces', 'nyassobi-wp-plugin'), [$this, 'render_news'], self::POST_TYPE, 'normal');
         add_meta_box('nyassobi_conv_volunteers', __('Volontaires', 'nyassobi-wp-plugin'), [$this, 'render_volunteers'], self::POST_TYPE, 'normal');
     }
 
@@ -998,6 +1405,42 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
         echo '</tbody></table>';
     }
 
+    public function render_infos(\WP_Post $post): void
+    {
+        echo '<p class="description">' . esc_html__('Visible sur la page Conventions du site. Le CA peut aussi le faire sur Discord avec /convention-infos.', 'nyassobi-wp-plugin') . '</p>';
+        printf('<p><label for="nyassobi_conv_description"><strong>%s</strong></label><br><textarea id="nyassobi_conv_description" name="nyassobi_conv_description" rows="5" class="large-text" maxlength="2000">%s</textarea></p>', esc_html__('Description (horaires, stand, ce qu\'on attend des bénévoles…)', 'nyassobi-wp-plugin'), esc_textarea($this->meta($post->ID, self::META_DESCRIPTION)));
+        printf('<p><label for="nyassobi_conv_lien"><strong>%s</strong></label><br><input type="url" id="nyassobi_conv_lien" name="nyassobi_conv_lien" value="%s" class="large-text" placeholder="https://"></p>', esc_html__('Site de la convention', 'nyassobi-wp-plugin'), esc_attr($this->meta($post->ID, self::META_LINK)));
+        $images = $this->images($post->ID);
+        if ($images) {
+            echo '<div style="display:flex;flex-wrap:wrap;gap:12px">';
+            foreach ($images as $image) {
+                printf('<label style="display:grid;gap:4px;text-align:center"><img src="%s" alt="" style="width:120px;height:120px;object-fit:cover;border-radius:6px"><span><input type="checkbox" name="nyassobi_conv_retirer[]" value="%d"> %s</span></label>', esc_url((string) wp_get_attachment_image_url($image, 'thumbnail')), $image, esc_html__('Retirer', 'nyassobi-wp-plugin'));
+            }
+            echo '</div>';
+        }
+        printf('<p><label for="nyassobi_conv_images"><strong>%s</strong></label><br><input type="file" id="nyassobi_conv_images" name="nyassobi_conv_images[]" accept="image/jpeg,image/png,image/webp,image/gif" multiple> <span class="description">%s</span></p>', esc_html__('Ajouter une affiche ou des photos', 'nyassobi-wp-plugin'), esc_html(sprintf(__('%d images au plus, 8 Mo chacune.', 'nyassobi-wp-plugin'), self::MAX_IMAGES)));
+    }
+
+    public function render_news(\WP_Post $post): void
+    {
+        $news = array_reverse($this->news($post->ID));
+        if ($news) {
+            echo '<table class="widefat striped"><tbody>';
+            foreach ($news as $item) {
+                printf('<tr><td style="width:120px">%s</td><td>%s%s</td><td style="width:90px"><label><input type="checkbox" name="nyassobi_conv_annonce_retirer[]" value="%s"> %s</label></td></tr>',
+                    esc_html(wp_date('j M Y', (int) $item['date'])),
+                    nl2br(esc_html($item['text'])),
+                    $item['image'] ? sprintf('<br><img src="%s" alt="" style="max-width:160px;margin-top:6px;border-radius:6px">', esc_url((string) wp_get_attachment_image_url((int) $item['image'], 'medium'))) : '',
+                    esc_attr($item['id']),
+                    esc_html__('Supprimer', 'nyassobi-wp-plugin')
+                );
+            }
+            echo '</tbody></table>';
+        }
+        printf('<p><label for="nyassobi_conv_annonce"><strong>%s</strong></label><br><textarea id="nyassobi_conv_annonce" name="nyassobi_conv_annonce" rows="3" class="large-text" maxlength="1500"></textarea></p>', esc_html__('Nouvelle annonce', 'nyassobi-wp-plugin'));
+        printf('<p><input type="file" name="nyassobi_conv_annonce_image" accept="image/jpeg,image/png,image/webp,image/gif"> <span class="description">%s</span></p>', esc_html__('Image facultative. Publiée à l\'enregistrement, sur le site et dans le salon public de Discord.', 'nyassobi-wp-plugin'));
+    }
+
     public function render_volunteers(\WP_Post $post): void
     {
         $people = $this->volunteers($post->ID);
@@ -1006,14 +1449,22 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
             return;
         }
         echo '<table class="widefat striped"><thead><tr>';
-        foreach ([__('Pseudo', 'nyassobi-wp-plugin'), __('Rôle', 'nyassobi-wp-plugin'), __('Trajet', 'nyassobi-wp-plugin'), __('Transport', 'nyassobi-wp-plugin'), __('Animation proposée', 'nyassobi-wp-plugin'), __('Commentaire', 'nyassobi-wp-plugin')] as $label) {
+        $notes = $this->notes($post->ID);
+        foreach ([__('Pseudo', 'nyassobi-wp-plugin'), __('Rôle', 'nyassobi-wp-plugin'), __('Trajet', 'nyassobi-wp-plugin'), __('Transport', 'nyassobi-wp-plugin'), __('Animation proposée', 'nyassobi-wp-plugin'), __('Commentaire', 'nyassobi-wp-plugin'), __('Décision du CA', 'nyassobi-wp-plugin'), __('Note du CA', 'nyassobi-wp-plugin')] as $label) {
             echo '<th>' . esc_html($label) . '</th>';
         }
         echo '</tr></thead><tbody>';
         foreach ($people as $p) {
-            printf('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>', esc_html($p['name']), esc_html(self::ROLES[$p['role']] ?? $p['role']), esc_html(self::TRAVEL[$p['travel']] ?? $p['travel']), esc_html($p['transport']), 'staff' !== $p['role'] ? esc_html($p['animation']) : '', esc_html($p['comment']));
+            $note = $notes[$p['discord_id']] ?? ['status' => '', 'note' => ''];
+            $select = '<select name="nyassobi_conv_notes[' . esc_attr($p['discord_id']) . '][status]"><option value="">—</option>';
+            foreach (self::STATUSES as $value => $label) {
+                $select .= sprintf('<option value="%s"%s>%s</option>', esc_attr($value), selected($note['status'], $value, false), esc_html($label));
+            }
+            $select .= '</select>';
+            printf('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><input type="text" name="nyassobi_conv_notes[%s][note]" value="%s" maxlength="300" class="regular-text"></td></tr>', esc_html($p['name']), esc_html(self::ROLES[$p['role']] ?? $p['role']), esc_html(self::TRAVEL[$p['travel']] ?? $p['travel']), esc_html($p['transport']), 'staff' !== $p['role'] ? esc_html($p['animation']) : '', esc_html($p['comment']), $select, esc_attr($p['discord_id']), esc_attr($note['note']));
         }
         echo '</tbody></table>';
+        printf('<p class="description">%s</p>', esc_html__('Décision et note restent internes au CA : elles apparaissent dans le récapitulatif des orgas, jamais pour le volontaire.', 'nyassobi-wp-plugin'));
         printf('<p><a class="button" href="%s">%s</a></p>', esc_url(wp_nonce_url(admin_url('admin-post.php?action=nyassobi_conventions_export&convention=' . $post->ID), 'nyassobi_conv_export_' . $post->ID)), esc_html__('Exporter pour Excel', 'nyassobi-wp-plugin'));
     }
 
@@ -1030,6 +1481,59 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
         $needs = (string) ($_POST['nyassobi_conv_besoins'] ?? '');
         update_post_meta($post_id, self::META_NEEDS, isset(self::NEEDS[$needs]) ? $needs : 'les-deux');
         update_post_meta($post_id, self::META_OPEN, empty($_POST['nyassobi_conv_ouverte']) ? '0' : '1');
+
+        $upload = static function (string $field, int $index = -1): ?array {
+            $f = $_FILES[$field] ?? null;
+            if (! is_array($f)) {
+                return null;
+            }
+            $error = $index >= 0 ? ($f['error'][$index] ?? 4) : ($f['error'] ?? 4);
+            $tmp = $index >= 0 ? ($f['tmp_name'][$index] ?? '') : ($f['tmp_name'] ?? '');
+            $name = $index >= 0 ? ($f['name'][$index] ?? 'image') : ($f['name'] ?? 'image');
+            if (UPLOAD_ERR_OK !== (int) $error || ! is_uploaded_file((string) $tmp)) {
+                return null;
+            }
+
+            return ['bytes' => (string) file_get_contents((string) $tmp), 'name' => (string) $name];
+        };
+        $retirer = array_map('intval', (array) ($_POST['nyassobi_conv_retirer'] ?? []));
+        $images = array_values(array_diff($this->images($post_id), $retirer));
+        foreach (array_intersect($this->images($post_id), $retirer) as $gone) {
+            wp_delete_attachment($gone, true);
+        }
+        update_post_meta($post_id, self::META_IMAGES, $images);
+        $new_images = [];
+        foreach (array_keys((array) ($_FILES['nyassobi_conv_images']['name'] ?? [])) as $i) {
+            $file = $upload('nyassobi_conv_images', (int) $i);
+            $stored = $file ? $this->store_image($post_id, $file['bytes'], $file['name']) : null;
+            if (is_int($stored)) {
+                $new_images[] = $stored;
+            }
+        }
+        $this->set_info($post_id, (string) wp_unslash($_POST['nyassobi_conv_description'] ?? ''), (string) wp_unslash($_POST['nyassobi_conv_lien'] ?? ''), $new_images, false);
+
+        $notes = $this->notes($post_id);
+        foreach ((array) ($_POST['nyassobi_conv_notes'] ?? []) as $discord_id => $entry) {
+            if (ctype_digit((string) $discord_id) && is_array($entry)) {
+                $status = (string) ($entry['status'] ?? '');
+                $notes[(string) $discord_id] = [
+                    'status' => isset(self::STATUSES[$status]) ? $status : '',
+                    'note' => mb_substr(sanitize_text_field((string) wp_unslash($entry['note'] ?? '')), 0, 300),
+                ];
+            }
+        }
+        update_post_meta($post_id, self::META_NOTES, $notes);
+
+        foreach ((array) ($_POST['nyassobi_conv_annonce_retirer'] ?? []) as $news_id) {
+            $this->remove_news($post_id, sanitize_key((string) $news_id));
+        }
+        $text = (string) wp_unslash($_POST['nyassobi_conv_annonce'] ?? '');
+        $file = $upload('nyassobi_conv_annonce_image');
+        if ('' !== trim($text) || $file) {
+            $stored = $file ? $this->store_image($post_id, $file['bytes'], $file['name']) : 0;
+            $this->add_news($post_id, $text, is_int($stored) ? $stored : 0);
+        }
+
         if ('publish' === $post->post_status) {
             $this->update_recap($post_id);
         }
@@ -1123,6 +1627,13 @@ Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $th
         $message = $this->meta($post_id, self::META_MESSAGE);
         if ('' !== $channel && '' !== $message) {
             Nyassobi_Membership::instance()->discord_request('DELETE', '/channels/' . rawurlencode($channel) . '/messages/' . rawurlencode($message));
+        }
+        foreach ($this->news($post_id) as $item) {
+            $this->remove_news($post_id, $item['id']);
+        }
+        // Posters, photos and announcement images go with the convention.
+        foreach (get_children(['post_parent' => $post_id, 'post_type' => 'attachment', 'fields' => 'ids']) as $attachment) {
+            wp_delete_attachment((int) $attachment, true);
         }
         foreach (get_posts(['post_type' => self::RESPONSE_TYPE, 'post_status' => 'any', 'fields' => 'ids', 'posts_per_page' => -1]) as $rid) {
             $choices = $this->choices((int) $rid);
