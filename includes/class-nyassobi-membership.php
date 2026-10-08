@@ -387,6 +387,12 @@ final class Nyassobi_Membership
                 'description' => __('Salon privé où arrive le récapitulatif de chaque convention, avec le profil de chaque volontaire.', 'nyassobi-wp-plugin'),
                 'type' => 'id',
             ],
+            'conventions_summary_channel_id' => [
+                'section' => 'conventions',
+                'label' => __('ID du salon du tableau public', 'nyassobi-wp-plugin'),
+                'description' => __('Facultatif. Un message y résume les conventions à venir : nombre de staff et d\'animateurs, inscriptions ouvertes ou non, sans aucun pseudo. Il se met à jour tout seul.', 'nyassobi-wp-plugin'),
+                'type' => 'id',
+            ],
             'sender_email' => [
                 'section' => 'emails',
                 'label' => __('Adresse d\'expédition', 'nyassobi-wp-plugin'),

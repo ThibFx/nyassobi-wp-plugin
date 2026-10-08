@@ -41,6 +41,8 @@ final class Nyassobi_Conventions
     private const META_ANIMATION = '_nyassobi_conv_animation';
     private const META_COMMENT = '_nyassobi_conv_commentaire';
 
+    /** Where the public status table was posted: channel and message. */
+    private const SUMMARY_OPTION = 'nyassobi_conv_tableau';
     private const SESSION_PREFIX = 'nyassobi_conv_session_';
     private const SESSION_SECONDS = 2 * HOUR_IN_SECONDS;
     private const SAVES_PER_HOUR = 20;
@@ -84,6 +86,15 @@ final class Nyassobi_Conventions
         add_action('add_meta_boxes_' . self::POST_TYPE, [$this, 'register_metaboxes']);
         add_action('save_post_' . self::POST_TYPE, [$this, 'save_convention'], 10, 2);
         add_action('before_delete_post', [$this, 'on_delete']);
+        add_action('deleted_post', [$this, 'after_change'], 10, 2);
+        add_action('trashed_post', [$this, 'after_change']);
+        add_action('untrashed_post', [$this, 'after_change']);
+        // The table appears as soon as its channel is saved in the settings.
+        add_action('update_option_nyassobi_membership', function ($old, $new): void {
+            if (($old['conventions_summary_channel_id'] ?? '') !== ($new['conventions_summary_channel_id'] ?? '')) {
+                $this->update_summary();
+            }
+        }, 10, 2);
         add_filter('manage_' . self::POST_TYPE . '_posts_columns', [$this, 'admin_columns']);
         add_action('manage_' . self::POST_TYPE . '_posts_custom_column', [$this, 'render_admin_column'], 10, 2);
         add_action('admin_notices', [$this, 'commands_notice']);
@@ -275,6 +286,7 @@ final class Nyassobi_Conventions
         update_post_meta($id, self::META_NEEDS, isset(self::NEEDS[$needs]) ? $needs : 'les-deux');
         update_post_meta($id, self::META_OPEN, '1');
         $this->update_recap((int) $id);
+        $this->update_summary();
 
         return (int) $id;
     }
@@ -283,6 +295,7 @@ final class Nyassobi_Conventions
     {
         update_post_meta($id, self::META_OPEN, $open ? '1' : '0');
         $this->update_recap($id);
+        $this->update_summary();
     }
 
     /* ------------------------------------------------------------------
@@ -420,6 +433,7 @@ final class Nyassobi_Conventions
         foreach (array_unique(array_merge(array_keys($before), array_keys($choices))) as $cid) {
             $this->update_recap((int) $cid);
         }
+        $this->update_summary();
 
         return null;
     }
@@ -506,6 +520,97 @@ final class Nyassobi_Conventions
         $posted = $discord->discord_request('POST', '/channels/' . rawurlencode($channel) . '/messages', $this->recap_message($id));
         if (isset($posted['id'])) {
             update_post_meta($id, self::META_MESSAGE, (string) $posted['id']);
+        }
+    }
+
+    /**
+     * @param int|\WP_Post|null $post
+     */
+    public function after_change(int $post_id, $post = null): void
+    {
+        $type = $post instanceof \WP_Post ? $post->post_type : get_post_type($post_id);
+        if (self::POST_TYPE === $type) {
+            $this->update_summary();
+        }
+    }
+
+    /**
+     * The status table everyone can see: per convention, how many staff and
+     * animators offered to come, and whether the team is complete. No names:
+     * those stay in the organisers' recap.
+     *
+     * @return array<string,mixed>
+     */
+    private function summary_message(): array
+    {
+        $md = static fn (string $t): string => Nyassobi_Membership::escape_markdown($t);
+        $lines = [];
+        $any_open = false;
+        foreach ($this->upcoming_ids() as $id) {
+            $c = $this->convention($id);
+            $people = $this->volunteers($id);
+            $counts = [];
+            if ('animation' !== $c['needs']) {
+                $counts[] = '👥 Staff : ' . count(array_filter($people, static fn ($p) => 'staff' === $p['role']));
+            }
+            if ('staff' !== $c['needs']) {
+                $counts[] = '🎤 Animation : ' . count(array_filter($people, static fn ($p) => 'animation' === $p['role']));
+            }
+            $counts[] = $c['open'] ? '✅ Inscriptions ouvertes' : '🔒 Équipe complète';
+            $any_open = $any_open || $c['open'];
+            $lines[] = sprintf("**%s** · %s%s
+%s", $md($c['name']), $c['dates'], '' !== $c['city'] ? ' · ' . $md($c['city']) : '', implode(' · ', $counts));
+        }
+
+        $body = '';
+        foreach ($lines as $i => $line) {
+            if (mb_strlen($body . "
+
+" . $line) > 3700) {
+                $body .= sprintf("
+
+… et %d autre(s) convention(s).", count($lines) - $i);
+                break;
+            }
+            $body .= ('' === $body ? '' : "
+
+") . $line;
+        }
+        if ('' === $body) {
+            $body = 'Aucune convention à venir pour le moment.';
+        } elseif ($any_open) {
+            $body .= "
+
+Tu veux aider sur le stand ou proposer une animation ? Propose-toi ici : " . $this->page_url();
+        }
+
+        return [
+            'embeds' => [[
+                'title' => '🎪 Conventions à venir',
+                'description' => $body,
+                'color' => 0xE8622F,
+                'footer' => ['text' => 'Mis à jour automatiquement'],
+            ]],
+            'allowed_mentions' => ['parse' => []],
+        ];
+    }
+
+    public function update_summary(): void
+    {
+        $channel = (string) ($this->settings()['conventions_summary_channel_id'] ?? '');
+        if ('' === $channel) {
+            return;
+        }
+        $discord = Nyassobi_Membership::instance();
+        $posted = (array) get_option(self::SUMMARY_OPTION, []);
+        if ($channel === ($posted['channel'] ?? '') && '' !== ($posted['message'] ?? '')
+            && null !== $discord->discord_request('PATCH', '/channels/' . rawurlencode($channel) . '/messages/' . rawurlencode((string) $posted['message']), $this->summary_message())) {
+            return;
+        }
+        // First time, new channel, or the message was deleted by hand.
+        $new = $discord->discord_request('POST', '/channels/' . rawurlencode($channel) . '/messages', $this->summary_message());
+        if (isset($new['id'])) {
+            update_option(self::SUMMARY_OPTION, ['channel' => $channel, 'message' => (string) $new['id']], false);
         }
     }
 
@@ -928,6 +1033,7 @@ final class Nyassobi_Conventions
         if ('publish' === $post->post_status) {
             $this->update_recap($post_id);
         }
+        $this->update_summary();
     }
 
     /** @param array<string,string> $columns */
@@ -1045,5 +1151,7 @@ final class Nyassobi_Conventions
         foreach ($ids as $id) {
             wp_delete_post((int) $id, true);
         }
+        // Also drops conventions that just ended from the public table.
+        $this->update_summary();
     }
 }
