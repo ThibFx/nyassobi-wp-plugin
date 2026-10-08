@@ -817,13 +817,13 @@ final class Nyassobi_Membership_Payment
     public function route_discord_return(\WP_REST_Request $request): void
     {
         $state = (string) $request->get_param('state');
+        // The conventions page signs in through the same return address.
+        if (Nyassobi_Conventions::is_login_state($state)) {
+            $this->go(Nyassobi_Conventions::instance()->finish_login((string) $request->get_param('code'), '' !== (string) $request->get_param('error')));
+        }
         $key = self::DISCORD_STATE_PREFIX . (preg_match('/^[a-f0-9]{32}$/', $state) ? $state : 'invalide');
         $data = get_transient($key);
         delete_transient($key);
-        // The conventions page signs in through the same Discord return address.
-        if (is_array($data) && 'conventions' === ($data['type'] ?? '')) {
-            $this->go(Nyassobi_Conventions::instance()->finish_login((string) $request->get_param('code'), '' !== (string) $request->get_param('error')));
-        }
         $post_id = is_numeric($data) ? (int) $data : 0;
         $token = $post_id ? $this->meta($post_id, self::META_TOKEN) : '';
         if (! $post_id || Nyassobi_Membership::STATUS_PAID !== $this->meta($post_id, Nyassobi_Membership::META_STATUS)) {

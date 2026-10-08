@@ -394,6 +394,31 @@ final class Nyassobi_Conventions
      */
     private function save_response(array $session, array $raw_choices, string $animation, string $comment): ?string
     {
+        // A double click sends two saves at once: without a lock, both see
+        // "no answer yet" and the person ends up listed twice.
+        $lock = 'nyassobi_conv_lock_' . $session['id'];
+        for ($try = 0; ! add_option($lock, (string) time(), '', false); ++$try) {
+            if ((int) get_option($lock) < time() - 10) {
+                delete_option($lock);
+            } elseif ($try >= 20) {
+                return __('Un enregistrement est déjà en cours : réessaie dans quelques secondes.', 'nyassobi-wp-plugin');
+            } else {
+                usleep(150000);
+            }
+        }
+        try {
+            return $this->save_response_locked($session, $raw_choices, $animation, $comment);
+        } finally {
+            delete_option($lock);
+        }
+    }
+
+    /**
+     * @param array<string,mixed>            $session
+     * @param array<int,array<string,mixed>> $raw_choices
+     */
+    private function save_response_locked(array $session, array $raw_choices, string $animation, string $comment): ?string
+    {
         $discord_id = (string) $session['id'];
         $rate = 'nyassobi_conv_saves_' . $discord_id;
         if ((int) get_transient($rate) >= self::SAVES_PER_HOUR) {
@@ -1518,8 +1543,10 @@ final class Nyassobi_Conventions
             wp_redirect($this->page_url('erreur=config'), 302, 'Nyassobi');
             exit;
         }
-        $state = bin2hex(random_bytes(16));
-        set_transient(Nyassobi_Membership_Payment::DISCORD_STATE_PREFIX . $state, ['type' => 'conventions'], 15 * MINUTE_IN_SECONDS);
+        // Signed instead of stored: an anonymous visitor hitting this address
+        // in a loop must not be able to fill the database.
+        $time = (string) time();
+        $state = 'c' . $time . '-' . self::state_signature($time);
         wp_redirect('https://discord.com/oauth2/authorize?' . http_build_query([
             'client_id' => $this->settings()['discord_application_id'],
             'response_type' => 'code',
@@ -1530,6 +1557,21 @@ final class Nyassobi_Conventions
             'prompt' => 'none',
         ], '', '&', PHP_QUERY_RFC3986), 302, 'Nyassobi');
         exit;
+    }
+
+    private static function state_signature(string $time): string
+    {
+        return substr(hash_hmac('sha256', 'nyassobi-conventions|' . $time, wp_salt('auth')), 0, 32);
+    }
+
+    /** True for a state made by route_login() less than 15 minutes ago. */
+    public static function is_login_state(string $state): bool
+    {
+        if (! preg_match('/^c(\d{10})-([a-f0-9]{32})$/', $state, $m)) {
+            return false;
+        }
+
+        return hash_equals(self::state_signature($m[1]), $m[2]) && time() - (int) $m[1] <= 15 * MINUTE_IN_SECONDS && (int) $m[1] <= time() + 60;
     }
 
     /**
