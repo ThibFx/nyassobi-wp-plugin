@@ -52,10 +52,10 @@ final class Nyassobi_Conventions
         'staff' => 'Staff seulement',
         'animation' => 'Animation seulement',
     ];
+    /** One role per person and convention: staff and animators are different people. */
     public const ROLES = [
         'staff' => 'Staff du stand',
         'animation' => 'Animation',
-        'les-deux' => 'Staff et animation',
     ];
     public const TRAVEL = [
         '1h' => 'moins d\'1 h',
