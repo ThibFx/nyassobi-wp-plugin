@@ -41,6 +41,8 @@ final class Nyassobi_Conventions
     private const META_NEWS = '_nyassobi_conv_annonces';
     /** …or kept for the CA only (organisers' recap). */
     private const META_NOTES = '_nyassobi_conv_notes';
+    /** Sent by the animators the CA picked, for the communication: model images, pronouns, languages. */
+    private const META_COMM = '_nyassobi_conv_comm';
 
     private const META_DISCORD_ID = '_nyassobi_conv_discord_id';
     private const META_NAME = '_nyassobi_conv_pseudo';
@@ -95,6 +97,11 @@ final class Nyassobi_Conventions
     private const IMAGE_TYPES = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif'];
     /** Images sent on Discord are downloaded after the 3-second answer Discord expects. */
     private const ATTACHMENT_HOOK = 'nyassobi_conv_attachment';
+    /** Model images for the communication: PNG only, for their transparent background. */
+    private const COMM_TYPES = ['image/png' => 'png'];
+    private const COMM_MAX_IMAGES = 5;
+    /** Files are posted to Discord in groups below its upload limit (10 Mo without boosts). */
+    private const DISCORD_UPLOAD_BYTES = 9 * 1024 * 1024;
 
     /** @var self|null */
     private static $instance = null;
@@ -136,6 +143,7 @@ final class Nyassobi_Conventions
         add_filter('nyassobi_discord_command', [$this, 'handle_command'], 10, 2);
         add_filter('nyassobi_discord_component', [$this, 'handle_component'], 10, 2);
         add_filter('nyassobi_discord_component', [$this, 'handle_volunteer'], 10, 2);
+        add_filter('nyassobi_discord_component', [$this, 'handle_comm'], 10, 2);
         add_action(Nyassobi_Membership::PURGE_HOOK, [$this, 'purge']);
         add_action(self::ATTACHMENT_HOOK, [$this, 'finish_command'], 10, 3);
         // File inputs on the convention screen need a multipart form.
@@ -540,6 +548,7 @@ final class Nyassobi_Conventions
             $notes = $this->notes((int) $cid);
             unset($notes[$discord_id]);
             update_post_meta((int) $cid, self::META_NOTES, $notes);
+            $this->forget_comm((int) $cid, $discord_id);
         }
         foreach (array_unique(array_merge(array_keys($before), array_keys($choices))) as $cid) {
             $this->update_recap((int) $cid);
@@ -617,11 +626,15 @@ final class Nyassobi_Conventions
         if ('' !== $this->per_day($id, $people)) {
             $head .= "\n📆 " . $this->per_day($id, $people);
         }
+        if (count($people) > 100) {
+            $head .= "\nLes menus s'arrêtent à 100 volontaires : les suivants se notent dans WordPress.";
+        }
 
+        $comm = $this->comm($id);
         $blocks = [];
         foreach ($people as $p) {
             $note = $notes[$p['discord_id']] ?? [];
-            $block = sprintf('%s**%s** <@%s> · %s%s · 🚗 %s%s%s%s',
+            $block = sprintf('%s**%s** <@%s> · %s%s · 🚗 %s%s%s%s%s',
                 isset(self::STATUSES[$note['status'] ?? '']) ? mb_substr(self::STATUSES[$note['status']], 0, 1) . ' ' : '',
                 $md($p['name']),
                 $p['discord_id'],
@@ -630,7 +643,8 @@ final class Nyassobi_Conventions
                 self::TRAVEL[$p['travel']] ?? $p['travel'],
                 '' !== $p['transport'] ? ', ' . $md($p['transport']) : '',
                 $p['slots'] ? ' · 🕐 ' . self::slots_text($p['slots']) : '',
-                ! empty($note['notified']) ? ' · ✉️ prévenu·e' : ''
+                ! empty($note['notified']) ? ' · ✉️ prévenu·e' : '',
+                isset($comm[$p['discord_id']]) ? ' · 🖼️ comm reçue' : ('retenu' === ($note['status'] ?? '') && 'animation' === $p['role'] ? ' · 🖼️ comm en attente' : '')
             );
             if ('staff' !== $p['role'] && '' !== $p['animation']) {
                 $block .= "\n> 🎤 " . str_replace("\n", ' ', $md($short($p['animation'], 300)));
@@ -689,10 +703,13 @@ final class Nyassobi_Conventions
             ],
         ]];
         $people = $this->volunteers($id);
-        if ($people) {
-            $notes = $this->notes($id);
+        $notes = $this->notes($id);
+        // Discord: 25 choices per menu, 5 rows per message. The buttons take
+        // one row, so up to four menus: 100 volunteers.
+        $chunks = array_chunk(array_slice($people, 0, 100), 25);
+        foreach ($chunks as $n => $chunk) {
             $options = [];
-            foreach (array_slice($people, 0, 25) as $p) {
+            foreach ($chunk as $p) {
                 $status = self::STATUSES[$notes[$p['discord_id']]['status'] ?? ''] ?? '';
                 $options[] = [
                     'label' => mb_substr($p['name'], 0, 100) ?: 'Sans pseudo',
@@ -700,7 +717,10 @@ final class Nyassobi_Conventions
                     'description' => mb_substr((self::ROLES[$p['role']] ?? '') . ('' !== $this->days_text($id, $p['days']) ? ' · ' . $this->days_text($id, $p['days']) : '') . ' · ' . (self::TRAVEL[$p['travel']] ?? '') . ('' !== $status ? ' · ' . $status : ''), 0, 100),
                 ];
             }
-            $rows[] = ['type' => 1, 'components' => [['type' => 3, 'custom_id' => 'nyconv:pick:' . $id, 'placeholder' => 'Noter un volontaire…', 'options' => $options]]];
+            $placeholder = count($chunks) > 1
+                ? sprintf('Noter un volontaire (%d à %d)…', $n * 25 + 1, $n * 25 + count($chunk))
+                : 'Noter un volontaire…';
+            $rows[] = ['type' => 1, 'components' => [['type' => 3, 'custom_id' => 'nyconv:pick:' . $id . ':' . $n, 'placeholder' => $placeholder, 'options' => $options]]];
         }
 
         return $rows;
@@ -713,8 +733,8 @@ final class Nyassobi_Conventions
             'embeds' => [[
                 'title' => '🎪 Conventions · panneau du CA',
                 'description' => "Ajoute une convention avec le bouton ci-dessous : un formulaire s'ouvre.\n\n"
-                    . "Sous chaque récapitulatif : **📝 Infos** (description et lien, visibles des adhérents), **📣 Annonce**, **🔒 Fermer / 🔓 Rouvrir**, **🗑️ Supprimer**, et le menu **Noter un volontaire…** (décision et note, visibles du CA seulement).\n\n"
-                    . "Pour ajouter une affiche ou des photos : `/convention-infos` avec l'image en pièce jointe, ou WordPress.",
+                    . "Sous chaque récapitulatif : **📝 Infos** (description, lien, affiche et photos, visibles des adhérents), **📣 Annonce** (avec image si besoin), **🔒 Fermer / 🔓 Rouvrir**, **🗑️ Supprimer**, et le menu **Noter un volontaire…** (décision et note, visibles du CA seulement).\n\n"
+                    . "Les animateurs retenus et prévenus reçoivent un bouton pour envoyer leurs infos pour la comm (images PNG du model, pronoms, langues) : elles arrivent dans ce salon, sous le récapitulatif.",
                 'color' => 0xE8622F,
             ]],
             'components' => [[
@@ -1005,18 +1025,14 @@ final class Nyassobi_Conventions
                 if (! $this->is_upcoming($id)) {
                     return $membership->ephemeral(__('Convention introuvable : choisis-la dans la liste proposée.', 'nyassobi-wp-plugin'));
                 }
-                $attachment = $payload['data']['resolved']['attachments'][$options['image'] ?? ''] ?? null;
-                if (is_array($attachment)) {
+                $attachments = self::sent_files($payload, [$options['image'] ?? '']);
+                if ($attachments) {
                     // Downloading an image can take longer than Discord waits:
                     // answer "thinking…" now, finish in the background.
-                    $token = (string) ($payload['token'] ?? '');
-                    wp_schedule_single_event(time(), self::ATTACHMENT_HOOK, [$name, $options + ['_attachment' => wp_json_encode(array_intersect_key($attachment, array_flip(['url', 'filename', 'size', 'content_type'])))], $token]);
-                    spawn_cron();
-
-                    return new \WP_REST_Response(['type' => 5, 'data' => ['flags' => 64]], 200);
+                    return $this->later($name, $options + ['_attachments' => wp_json_encode($attachments)], $payload, false);
                 }
 
-                return $membership->ephemeral($this->run_ca_command($name, $id, $options, null));
+                return $membership->ephemeral($this->run_ca_command($name, $id, $options, []) ?? self::done_text($name, $this->convention($id)['name']));
 
             default:
                 $lines = [];
@@ -1029,55 +1045,158 @@ final class Nyassobi_Conventions
     }
 
     /**
-     * The three CA commands that add content. Shared by the immediate answer
-     * and by finish_command() when an image had to be downloaded first.
+     * The CA commands and forms that add content. Shared by the immediate
+     * answer and by finish_command() once images are downloaded.
      *
-     * @param array<string,string>               $options
-     * @param array{bytes:string,name:string}|null $image
+     * @param array<string,string> $options
+     * @param int[]                $images Already in the media library; erased if refused.
+     *
+     * @return string|null Error message, or null once done.
      */
-    private function run_ca_command(string $name, int $id, array $options, ?array $image): string
+    private function run_ca_command(string $name, int $id, array $options, array $images): ?string
     {
-        $c = $this->convention($id);
-        $image_id = 0;
-        if (null !== $image) {
-            $stored = $this->store_image($id, $image['bytes'], $image['name']);
-            if (is_string($stored)) {
-                return $stored;
-            }
-            $image_id = $stored;
-        }
-
         if ('convention-note' === $name) {
-            $error = $this->set_note($id, (string) ($options['personne'] ?? ''), $options['statut'] ?? null, $options['note'] ?? null);
-
-            return $error ?? sprintf(__('Note enregistrée pour %s, visible dans le récapitulatif des orgas.', 'nyassobi-wp-plugin'), $c['name']);
+            return $this->set_note($id, (string) ($options['personne'] ?? ''), $options['statut'] ?? null, $options['note'] ?? null);
         }
         if ('convention-annonce' === $name) {
-            $error = $this->add_news($id, (string) ($options['texte'] ?? ''), $image_id, ! isset($options['mentionner']) || '' !== $options['mentionner']);
-
-            return $error ?? sprintf(__('Annonce publiée pour %s : sur la page Conventions du site et dans le salon des annonces.', 'nyassobi-wp-plugin'), $c['name']);
+            // One image per announcement.
+            foreach (array_slice($images, 1) as $extra) {
+                wp_delete_attachment($extra, true);
+            }
+            $images = array_slice($images, 0, 1);
+            $error = $this->add_news($id, (string) ($options['texte'] ?? ''), (int) ($images[0] ?? 0), ! isset($options['mentionner']) || '' !== $options['mentionner']);
+        } else {
+            $error = $this->set_info($id, $options['texte'] ?? null, $options['lien'] ?? null, $images, ! empty($options['retirer-images']) && 'false' !== $options['retirer-images']);
+        }
+        if (null !== $error) {
+            foreach ($images as $image) {
+                wp_delete_attachment($image, true);
+            }
         }
 
-        $error = $this->set_info($id, $options['texte'] ?? null, $options['lien'] ?? null, $image_id ? [$image_id] : [], ! empty($options['retirer-images']) && 'false' !== $options['retirer-images']);
+        return $error;
+    }
 
-        return $error ?? sprintf(__('Infos de %s mises à jour sur la page Conventions du site.', 'nyassobi-wp-plugin'), $c['name']);
+    private static function done_text(string $name, string $convention): string
+    {
+        switch ($name) {
+            case 'convention-note':
+                return sprintf(__('Note enregistrée pour %s, visible dans le récapitulatif des orgas.', 'nyassobi-wp-plugin'), $convention);
+            case 'convention-annonce':
+                return sprintf(__('Annonce publiée pour %s : sur la page Conventions du site et dans le salon des annonces.', 'nyassobi-wp-plugin'), $convention);
+            case 'comm':
+                return sprintf(__('✅ Merci ! Le CA a bien reçu tes infos pour la comm de %s. Tu peux les modifier avec le même bouton.', 'nyassobi-wp-plugin'), $convention);
+        }
+
+        return sprintf(__('Infos de %s mises à jour sur la page Conventions du site.', 'nyassobi-wp-plugin'), $convention);
     }
 
     /**
-     * Background part of a command with an image: download it from Discord,
-     * then replace Discord's "thinking…" with the result.
+     * Files sent with a command or a form, as Discord describes them.
+     *
+     * @param array<string,mixed> $payload
+     * @param string[]            $ids
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    private static function sent_files(array $payload, array $ids): array
+    {
+        $files = [];
+        foreach ($ids as $aid) {
+            $attachment = $payload['data']['resolved']['attachments'][$aid] ?? null;
+            if (is_array($attachment)) {
+                $files[] = array_intersect_key($attachment, array_flip(['url', 'filename', 'size', 'content_type']));
+            }
+        }
+
+        return $files;
+    }
+
+    /**
+     * Answers "thinking…" now and finishes in the background: downloading
+     * images can take longer than the 3 seconds Discord waits.
+     *
+     * @param array<string,string> $options
+     * @param array<string,mixed>  $payload
+     */
+    private function later(string $name, array $options, array $payload, bool $replace): \WP_REST_Response
+    {
+        wp_schedule_single_event(time(), self::ATTACHMENT_HOOK, [$name, $options, (string) ($payload['token'] ?? '')]);
+        // The site gets few visits: start WP-Cron now.
+        spawn_cron();
+
+        // 6 edits the private message the form came from, 5 starts a new one.
+        return new \WP_REST_Response($replace ? ['type' => 6] : ['type' => 5, 'data' => ['flags' => 64]], 200);
+    }
+
+    /**
+     * Downloads the images sent on Discord and files them under the
+     * convention, one at a time. All or nothing.
+     *
+     * @param array<int,mixed>     $attachments
+     * @param array<string,string> $types
+     *
+     * @return int[]|string Attachment ids, or an error message.
+     */
+    private function store_attachments(int $id, array $attachments, array $types = self::IMAGE_TYPES)
+    {
+        $stored = [];
+        foreach ($attachments as $attachment) {
+            $image = is_array($attachment) ? $this->fetch_attachment($attachment) : __('Image illisible.', 'nyassobi-wp-plugin');
+            $result = is_string($image) ? $image : $this->store_image($id, $image['bytes'], $image['name'], $types);
+            if (is_string($result)) {
+                foreach ($stored as $done) {
+                    wp_delete_attachment($done, true);
+                }
+
+                return $result;
+            }
+            $stored[] = $result;
+        }
+
+        return $stored;
+    }
+
+    /**
+     * Background part of a command or form with images: download them from
+     * Discord, then replace Discord's "thinking…" with the result. A refused
+     * form gets a « Corriger » button that opens it again, filled in.
      *
      * @param array<string,string> $options
      */
     public function finish_command(string $name, array $options, string $token): void
     {
-        $attachment = json_decode((string) ($options['_attachment'] ?? ''), true);
-        unset($options['_attachment']);
+        $attachments = json_decode((string) ($options['_attachments'] ?? ''), true);
+        $kept = json_decode((string) ($options['_kept'] ?? ''), true);
+        $user = (string) ($options['_user'] ?? '');
+        $form = (string) ($options['_form'] ?? '');
+        $options = array_diff_key($options, array_flip(['_attachments', '_kept', '_user', '_form']));
         $id = (int) ($options['convention'] ?? 0);
-        $image = is_array($attachment) ? $this->fetch_attachment($attachment) : __('Image illisible.', 'nyassobi-wp-plugin');
-        $result = ! $this->is_upcoming($id)
-            ? __('Convention introuvable.', 'nyassobi-wp-plugin')
-            : (is_string($image) ? $image : $this->run_ca_command($name, $id, $options, $image));
+
+        $error = $this->is_upcoming($id) ? null : __('Convention introuvable.', 'nyassobi-wp-plugin');
+        $images = [];
+        if (null === $error && is_array($attachments) && $attachments) {
+            $stored = $this->store_attachments($id, $attachments, 'comm' === $name ? self::COMM_TYPES : self::IMAGE_TYPES);
+            if (is_string($stored)) {
+                $error = $stored;
+            } else {
+                $images = $stored;
+            }
+        }
+        if (null === $error) {
+            $error = 'comm' === $name
+                ? $this->set_comm($id, $user, (string) ($options['pronoms'] ?? ''), (string) ($options['langues'] ?? ''), $images)
+                : $this->run_ca_command($name, $id, $options, $images);
+        }
+
+        $data = ['content' => $error ?? self::done_text($name, $this->convention($id)['name']), 'components' => [], 'allowed_mentions' => ['parse' => []]];
+        if ('' !== $user && '' !== $form) {
+            self::kept_form($user, $form, null !== $error && is_array($kept) ? $kept : []);
+            if (null !== $error && is_array($kept)) {
+                $data['content'] = '⚠️ ' . $error . ($attachments ? ' ' . __('Les images sont à remettre.', 'nyassobi-wp-plugin') : '');
+                $data['components'] = self::fix_button($form);
+            }
+        }
 
         $app = (string) ($this->settings()['discord_application_id'] ?? '');
         if ('' !== $app && preg_match('/^[A-Za-z0-9._-]+$/', $token)) {
@@ -1086,7 +1205,7 @@ final class Nyassobi_Conventions
                 'timeout' => 10,
                 'user-agent' => 'DiscordBot (https://nyassobi.fr, 1.0)',
                 'headers' => ['Content-Type' => 'application/json'],
-                'body' => wp_json_encode(['content' => $result, 'allowed_mentions' => ['parse' => []]]),
+                'body' => wp_json_encode($data),
             ]);
         }
     }
@@ -1095,10 +1214,28 @@ final class Nyassobi_Conventions
      * Buttons, menus and forms, for the CA
      * ------------------------------------------------------------------ */
 
-    /** @return array<string,mixed> */
-    private static function text_input(string $id, string $label, bool $long, bool $required, int $max, string $value = '', string $placeholder = ''): array
+    /**
+     * One question of a form: its title, an optional hint under it, and the
+     * field itself (text, menu or files).
+     *
+     * @param array<string,mixed> $component
+     *
+     * @return array<string,mixed>
+     */
+    private static function field(string $label, array $component, string $description = ''): array
     {
-        $input = ['type' => 4, 'custom_id' => $id, 'label' => mb_substr($label, 0, 45), 'style' => $long ? 2 : 1, 'required' => $required, 'max_length' => $max];
+        $field = ['type' => 18, 'label' => mb_substr($label, 0, 45), 'component' => $component];
+        if ('' !== $description) {
+            $field['description'] = mb_substr($description, 0, 100);
+        }
+
+        return $field;
+    }
+
+    /** @return array<string,mixed> */
+    private static function text(string $id, bool $long, bool $required, int $max, string $value = '', string $placeholder = ''): array
+    {
+        $input = ['type' => 4, 'custom_id' => $id, 'style' => $long ? 2 : 1, 'required' => $required, 'max_length' => $max];
         if ('' !== $value) {
             $input['value'] = mb_substr($value, 0, $max);
         }
@@ -1106,26 +1243,101 @@ final class Nyassobi_Conventions
             $input['placeholder'] = mb_substr($placeholder, 0, 100);
         }
 
-        return ['type' => 1, 'components' => [$input]];
+        return $input;
     }
 
-    /** @param array<int,array<string,mixed>> $rows */
-    private static function modal(string $id, string $title, array $rows): \WP_REST_Response
+    /**
+     * A menu inside a form, with the current choice already selected.
+     *
+     * @param array<string,string> $choices value => label
+     * @param string[]             $picked
+     *
+     * @return array<string,mixed>
+     */
+    private static function menu(string $id, array $choices, array $picked, int $max = 1): array
     {
-        return new \WP_REST_Response(['type' => 9, 'data' => ['custom_id' => $id, 'title' => mb_substr($title, 0, 45), 'components' => $rows]], 200);
-    }
-
-    /** « staff », « animation », « les deux »… as typed in a form. */
-    private static function parse_needs(string $text): string
-    {
-        $text = mb_strtolower(trim($text));
-        $staff = false !== strpos($text, 'staff');
-        $anim = false !== strpos($text, 'anim');
-        if ('' === $text || false !== strpos($text, 'deux') || ($staff && $anim)) {
-            return 'les-deux';
+        $options = [];
+        foreach ($choices as $value => $label) {
+            $options[] = ['label' => mb_substr($label, 0, 100), 'value' => (string) $value] + (in_array((string) $value, $picked, true) ? ['default' => true] : []);
         }
 
-        return $anim ? 'animation' : ($staff ? 'staff' : 'les-deux');
+        return ['type' => 3, 'custom_id' => $id, 'options' => $options, 'min_values' => 1, 'max_values' => min($max, count($options)), 'required' => true];
+    }
+
+    /** Images sent straight from the form, downloaded afterwards. @return array<string,mixed> */
+    private static function files(string $id, int $max): array
+    {
+        return ['type' => 19, 'custom_id' => $id, 'min_values' => 0, 'max_values' => $max, 'required' => false];
+    }
+
+    /** @param array<int,array<string,mixed>> $fields */
+    private static function modal(string $id, string $title, array $fields): \WP_REST_Response
+    {
+        return new \WP_REST_Response(['type' => 9, 'data' => ['custom_id' => $id, 'title' => mb_substr($title, 0, 45), 'components' => $fields]], 200);
+    }
+
+    /**
+     * A form sent back: each field by name. Text gives a string, menus and
+     * files a list. Reads both Discord layouts (labels and old rows).
+     *
+     * @param array<string,mixed> $payload
+     *
+     * @return array<string,string|string[]>
+     */
+    private static function form_values(array $payload): array
+    {
+        $values = [];
+        foreach ((array) ($payload['data']['components'] ?? []) as $row) {
+            foreach (isset($row['component']) ? [$row['component']] : (array) ($row['components'] ?? []) as $field) {
+                $values[(string) ($field['custom_id'] ?? '')] = isset($field['values']) ? array_map('strval', (array) $field['values']) : (string) ($field['value'] ?? '');
+            }
+        }
+
+        return $values;
+    }
+
+    /** @param array<string,string|string[]> $values */
+    private static function value(array $values, string $key, string $default = ''): string
+    {
+        $value = $values[$key] ?? $default;
+
+        return is_array($value) ? (string) ($value[0] ?? $default) : $value;
+    }
+
+    /**
+     * What a CA member typed in a refused form, to fill it in again when they
+     * click « Corriger ». Kept a quarter of an hour, per person and form.
+     *
+     * @param array<string,string|string[]>|null $values null reads, [] forgets.
+     *
+     * @return array<string,string|string[]>
+     */
+    private static function kept_form(string $user, string $form, ?array $values = null): array
+    {
+        $key = 'nyassobi_conv_form_' . md5($user . ':' . $form);
+        if (null === $values) {
+            $kept = get_transient($key);
+
+            return is_array($kept) ? $kept : [];
+        }
+        if ($values) {
+            set_transient($key, $values, 15 * MINUTE_IN_SECONDS);
+        } else {
+            delete_transient($key);
+        }
+
+        return $values;
+    }
+
+    /**
+     * $form is the custom_id of the button that opens the form: it also
+     * names what kept_form() keeps.
+     *
+     * @return array<int,array<string,mixed>>
+     */
+    private static function fix_button(string $form): array
+    {
+        return [['type' => 1, 'components' => [['type' => 2, 'style' => 1, 'label' => '✏️ Corriger', 'custom_id' => $form]]]];
     }
 
     /**
@@ -1162,6 +1374,14 @@ final class Nyassobi_Conventions
         if ('' !== $note['note']) {
             $lines[] = '📝 ' . $md($note['note']);
         }
+        $comm = $this->comm($id)[$discord_id] ?? null;
+        $selected = $this->is_selected_animator($id, $discord_id);
+        if (null !== $comm) {
+            $link = $this->comm_link($comm);
+            $lines[] = sprintf('🖼️ Comm : %s · %s · %d image(s)%s', $md($comm['pronouns']), $md($comm['languages']), count($comm['images']), '' !== $link ? ' · [voir les images](' . $link . ')' : '');
+        } elseif ($selected) {
+            $lines[] = '🖼️ Comm : pas encore reçue (images PNG du model, pronoms, langues)';
+        }
         if ('' !== $notice) {
             $lines[] = $notice;
         }
@@ -1176,8 +1396,13 @@ final class Nyassobi_Conventions
         if (in_array($note['status'], ['retenu', 'non'], true) && empty($note['notified'])) {
             $buttons[] = ['type' => 2, 'style' => 1, 'label' => '📨 Prévenir la personne', 'custom_id' => 'nyconv:notify:' . $id . ':' . $discord_id];
         }
+        $rows = [['type' => 1, 'components' => $buttons]];
+        // Already told without the request (or it got lost): ask again.
+        if ($selected && null === $comm && ! empty($note['notified'])) {
+            $rows[] = ['type' => 1, 'components' => [['type' => 2, 'style' => 2, 'label' => '🖼️ Redemander les infos pour la comm', 'custom_id' => 'nyconv:comm-ask:' . $id . ':' . $discord_id]]];
+        }
 
-        return ['content' => implode("\n", $lines), 'components' => [['type' => 1, 'components' => $buttons]]];
+        return ['content' => implode("\n", $lines), 'components' => $rows];
     }
 
     /**
@@ -1200,38 +1425,43 @@ final class Nyassobi_Conventions
         $action = $parts[1] ?? '';
         $id = (int) ($parts[2] ?? 0);
         $discord_id = ctype_digit($parts[3] ?? '') ? $parts[3] : '';
-
-        // A form sent back: its fields by name (both Discord layouts).
-        $values = [];
-        foreach ((array) ($payload['data']['components'] ?? []) as $row) {
-            foreach (isset($row['component']) ? [$row['component']] : (array) ($row['components'] ?? []) as $field) {
-                $values[(string) ($field['custom_id'] ?? '')] = (string) ($field['value'] ?? '');
-            }
-        }
+        $user = (string) ($payload['member']['user']['id'] ?? '');
+        $values = self::form_values($payload);
 
         if (! in_array($action, ['add', 'add-modal', 'list'], true) && ! $this->is_upcoming($id)) {
             return $membership->ephemeral(__('Cette convention n\'existe plus.', 'nyassobi-wp-plugin'));
         }
         $c = $id ? $this->convention($id) : null;
         $update = static fn (array $card): \WP_REST_Response => new \WP_REST_Response(['type' => 7, 'data' => $card + ['allowed_mentions' => ['parse' => []]]], 200);
+        // A form reopened with « Corriger » answers in place of that private
+        // message; any other form answers with a new private message (never
+        // over the panel or a recap, which everyone sees).
+        $from_private = 64 === (64 & (int) ($payload['message']['flags'] ?? 0));
+        $answer = static fn (string $text, array $components = []): \WP_REST_Response => new \WP_REST_Response([
+            'type' => $from_private ? 7 : 4,
+            'data' => ['content' => $text, 'components' => $components, 'allowed_mentions' => ['parse' => []]] + ($from_private ? [] : ['flags' => 64]),
+        ], 200);
 
         switch ($action) {
             case 'add':
+                $kept = self::kept_form($user, 'nyconv:add');
                 return self::modal('nyconv:add-modal', 'Nouvelle convention', [
-                    self::text_input('nom', 'Nom de la convention', false, true, 80),
-                    self::text_input('ville', 'Ville', false, true, 80),
-                    self::text_input('debut', 'Premier jour', false, true, 10, '', '03/10/2026'),
-                    self::text_input('fin', 'Dernier jour (si plusieurs jours)', false, false, 10, '', '04/10/2026'),
-                    self::text_input('besoins', 'On cherche : staff, animation ou les deux', false, false, 20, 'les deux'),
+                    self::field('Nom de la convention', self::text('nom', false, true, 80, self::value($kept, 'nom'))),
+                    self::field('Ville', self::text('ville', false, true, 80, self::value($kept, 'ville'))),
+                    self::field('Premier jour', self::text('debut', false, true, 10, self::value($kept, 'debut'), '03/10/2026'), 'Jour/mois/année'),
+                    self::field('Dernier jour', self::text('fin', false, false, 10, self::value($kept, 'fin'), '04/10/2026'), 'À laisser vide pour une seule journée'),
+                    self::field('On cherche', self::menu('besoins', self::NEEDS, [self::value($kept, 'besoins', 'les-deux')])),
                 ]);
 
             case 'add-modal':
-                $new = $this->create($values['nom'] ?? '', $values['ville'] ?? '', $values['debut'] ?? '', $values['fin'] ?? '', self::parse_needs($values['besoins'] ?? ''));
+                $new = $this->create(self::value($values, 'nom'), self::value($values, 'ville'), self::value($values, 'debut'), self::value($values, 'fin'), self::value($values, 'besoins', 'les-deux'));
                 if (is_string($new)) {
-                    return $membership->ephemeral($new . ' ' . __('Reclique sur « Nouvelle convention » pour recommencer.', 'nyassobi-wp-plugin'));
+                    self::kept_form($user, 'nyconv:add', $values);
+                    return $answer('⚠️ ' . $new, self::fix_button('nyconv:add'));
                 }
+                self::kept_form($user, 'nyconv:add', []);
                 $made = $this->convention($new);
-                return $membership->ephemeral(sprintf(__('Convention ajoutée : %1$s, %2$s. Son récapitulatif, avec ses boutons, vient d\'apparaître dans ce salon.', 'nyassobi-wp-plugin'), $made['name'], $made['dates']));
+                return $answer(sprintf(__('Convention ajoutée : %1$s, %2$s. Son récapitulatif, avec ses boutons, vient d\'apparaître dans le salon des orgas.', 'nyassobi-wp-plugin'), $made['name'], $made['dates']));
 
             case 'list':
                 $lines = [];
@@ -1242,24 +1472,43 @@ final class Nyassobi_Conventions
                 return $membership->ephemeral($lines ? mb_substr(implode("\n", $lines), 0, 1900) : __('Aucune convention à venir.', 'nyassobi-wp-plugin'));
 
             case 'infos':
-                return self::modal('nyconv:infos-modal:' . $id, 'Infos : ' . $c['name'], [
-                    self::text_input('texte', 'Description (visible des adhérents)', true, false, 2000, $this->meta($id, self::META_DESCRIPTION), 'Horaires, emplacement du stand, ce qu\'on attend des bénévoles…'),
-                    self::text_input('lien', 'Site de la convention', false, false, 300, $this->meta($id, self::META_LINK), 'https://'),
+                $kept = self::kept_form($user, 'nyconv:infos:' . $id);
+                $online = count($this->images($id));
+                $fields = [
+                    self::field('Description', self::text('texte', true, false, 2000, $kept ? self::value($kept, 'texte') : $this->meta($id, self::META_DESCRIPTION), 'Horaires, emplacement du stand, ce qu\'on attend des bénévoles…'), 'Visible des adhérents sur la page Conventions du site'),
+                    self::field('Site de la convention', self::text('lien', false, false, 300, $kept ? self::value($kept, 'lien') : $this->meta($id, self::META_LINK), 'https://')),
+                    self::field('Ajouter une affiche ou des photos', self::files('images', self::MAX_IMAGES), sprintf('JPEG, PNG, WebP ou GIF, 8 Mo chacune, %d en tout au plus', self::MAX_IMAGES)),
+                ];
+                if ($online) {
+                    $fields[] = self::field(sprintf('Images déjà en ligne : %d', $online), self::menu('anciennes', ['garder' => 'Les garder', 'retirer' => 'Les retirer toutes'], [self::value($kept, 'anciennes', 'garder')]));
+                }
+                return self::modal('nyconv:infos-modal:' . $id, 'Infos : ' . $c['name'], $fields);
+
+            case 'news':
+                $kept = self::kept_form($user, 'nyconv:news:' . $id);
+                return self::modal('nyconv:news-modal:' . $id, 'Annonce : ' . $c['name'], [
+                    self::field('L\'annonce', self::text('texte', true, true, 1500, self::value($kept, 'texte'), 'Les émojis du serveur s\'écrivent :NyassoHi: ; **gras** possible.'), 'Visible des adhérents, sur le site et dans le salon des annonces'),
+                    self::field('Image (facultatif)', self::files('images', 1), 'JPEG, PNG, WebP ou GIF, 8 Mo au plus'),
+                    self::field('Mentionner les adhérents ?', self::menu('mentionner', ['oui' => 'Oui, avec le rôle Adhérent', 'non' => 'Non, sans notification'], [self::value($kept, 'mentionner', 'oui')])),
                 ]);
 
             case 'infos-modal':
-                $error = $this->set_info($id, $values['texte'] ?? '', $values['lien'] ?? '', [], false);
-                return $membership->ephemeral($error ?? sprintf(__('Infos de %s mises à jour sur la page Conventions du site.', 'nyassobi-wp-plugin'), $c['name']));
-
-            case 'news':
-                return self::modal('nyconv:news-modal:' . $id, 'Annonce : ' . $c['name'], [
-                    self::text_input('texte', 'L\'annonce (visible des adhérents)', true, true, 1500, '', 'Les émojis du serveur s\'écrivent :NyassoHi: ; **gras** possible.'),
-                    self::text_input('mentionner', 'Mentionner les adhérents ? (oui / non)', false, false, 3, 'oui'),
-                ]);
-
             case 'news-modal':
-                $error = $this->add_news($id, $values['texte'] ?? '', 0, 0 !== strpos(mb_strtolower(trim($values['mentionner'] ?? 'oui')), 'n'));
-                return $membership->ephemeral($error ?? sprintf(__('Annonce publiée pour %s : sur la page Conventions du site et dans le salon des annonces.', 'nyassobi-wp-plugin'), $c['name']));
+                $infos = 'infos-modal' === $action;
+                $form = 'nyconv:' . ($infos ? 'infos:' : 'news:') . $id;
+                $name = $infos ? 'convention-infos' : 'convention-annonce';
+                $options = $infos
+                    ? ['texte' => self::value($values, 'texte'), 'lien' => self::value($values, 'lien'), 'retirer-images' => 'retirer' === self::value($values, 'anciennes') ? '1' : '']
+                    : ['texte' => self::value($values, 'texte'), 'mentionner' => 'non' === self::value($values, 'mentionner') ? '' : '1'];
+                // Images cannot be put back in a form: only the rest is kept.
+                $kept = array_diff_key($values, ['images' => true]);
+                $attachments = self::sent_files($payload, (array) ($values['images'] ?? []));
+                if ($attachments) {
+                    return $this->later($name, ['convention' => (string) $id, '_attachments' => wp_json_encode($attachments), '_user' => $user, '_form' => $form, '_kept' => wp_json_encode($kept)] + $options, $payload, $from_private);
+                }
+                $error = $this->run_ca_command($name, $id, $options, []);
+                self::kept_form($user, $form, null !== $error ? $kept : []);
+                return null !== $error ? $answer('⚠️ ' . $error, self::fix_button($form)) : $answer(self::done_text($name, $c['name']));
 
             case 'toggle':
                 // Answered by updating the recap the button belongs to.
@@ -1309,12 +1558,17 @@ final class Nyassobi_Conventions
 
             case 'note':
                 return self::modal('nyconv:note-modal:' . $id . ':' . $discord_id, 'Note du CA', [
-                    self::text_input('note', 'Note (visible du CA seulement)', true, false, 300, $this->notes($id)[$discord_id]['note'] ?? ''),
+                    self::field('Note', self::text('note', true, false, 300, $this->notes($id)[$discord_id]['note'] ?? ''), 'Visible du CA seulement'),
                 ]);
 
             case 'note-modal':
-                $error = $this->set_note($id, $discord_id, null, '' === trim($values['note'] ?? '') ? '-' : (string) $values['note']);
+                $note = self::value($values, 'note');
+                $error = $this->set_note($id, $discord_id, null, '' === trim($note) ? '-' : $note);
                 return null !== $error ? $membership->ephemeral($error) : $update($this->volunteer_card($id, $discord_id));
+
+            case 'comm-ask':
+                $sent = $this->ask_comm($id, $discord_id);
+                return $update($this->volunteer_card($id, $discord_id, $sent ? '✉️ Demande envoyée en message privé.' : '⚠️ Message privé impossible (messages privés fermés ou personne partie du serveur) : contacte-la directement.'));
         }
 
         return $membership->ephemeral(__('Action inconnue.', 'nyassobi-wp-plugin'));
@@ -1367,6 +1621,21 @@ final class Nyassobi_Conventions
         $already = $rid && isset($this->choices($rid)[$id]);
         $lines = [sprintf('🙋 **%s** · %s%s', Nyassobi_Membership::escape_markdown($c['name']), $c['dates'], '' !== $c['city'] ? ' · ' . Nyassobi_Membership::escape_markdown($c['city']) : '')];
         $lines[] = $already ? 'Tu es déjà proposé·e : change tes choix si besoin, puis **Continuer**.' : 'Choisis tes options, puis **Continuer**. Ça n\'engage à rien : le CA choisit l\'équipe et te recontacte.';
+        // What is picked so far, in words: a menu only shows the start of a long choice.
+        $several_days = count($this->days($id)) > 1;
+        $summary = [
+            'Rôle' => self::ROLES[$draft['role']] ?? '',
+            'Jours' => $several_days ? $this->days_text($id, $draft['days']) : null,
+            'Trajet' => self::TRAVEL[$draft['travel']] ?? '',
+            'Horaires' => 'animation' === $draft['role'] ? self::slots_text($draft['slots']) : null,
+        ];
+        $parts = [];
+        foreach ($summary as $label => $text) {
+            if (null !== $text) {
+                $parts[] = $label . ' : ' . ('' !== $text ? $text : '*à choisir*');
+            }
+        }
+        $lines[] = '📋 ' . implode(' · ', $parts);
         if ('' !== $error) {
             $lines[] = '⚠️ ' . $error;
         }
@@ -1492,26 +1761,36 @@ final class Nyassobi_Conventions
                     return $show($this->volunteer_form($discord_id, $id, 'Choisis ' . $missing . '.'), 7);
                 }
                 $choice = $rid ? ($this->choices($rid)[$id] ?? []) : [];
-                $fields = [self::text_input('transport', 'Moyen de transport (facultatif)', false, false, 80, (string) ($choice['transport'] ?? ''), 'Train, voiture, covoiturage…')];
+                // What was typed in a refused form comes first, then what is saved.
+                $typed = static fn (string $key, string $saved): string => (string) ($draft[$key] ?? $saved);
+                $fields = [self::field('Moyen de transport', self::text('transport', false, false, 80, $typed('transport', (string) ($choice['transport'] ?? '')), 'Train, voiture, covoiturage…'), 'Facultatif')];
                 if ('animation' === $draft['role']) {
-                    $fields[] = self::text_input('animation', 'L\'animation que tu proposes', true, true, 1000, $rid ? $this->meta($rid, self::META_ANIMATION) : '', 'Karaoké, art, rig, quiz… tout est bien tant que c\'est interactif');
+                    $fields[] = self::field('L\'animation que tu proposes', self::text('animation', true, true, 1000, $typed('animation', $rid ? $this->meta($rid, self::META_ANIMATION) : ''), 'Karaoké, art, rig, quiz… tout est bien tant que c\'est interactif'));
                 }
-                $fields[] = self::text_input('commentaire', 'Précisions ou questions (facultatif)', true, false, 1000, $rid ? $this->meta($rid, self::META_COMMENT) : '');
+                $fields[] = self::field('Précisions ou questions', self::text('commentaire', true, false, 1000, $typed('comment', $rid ? $this->meta($rid, self::META_COMMENT) : '')), 'Facultatif');
                 return self::modal('nyvol:modal:' . $id, mb_substr('Me proposer : ' . $c['name'], 0, 45), $fields);
 
             case 'modal':
-                $form = [];
-                foreach ((array) ($payload['data']['components'] ?? []) as $row) {
-                    foreach (isset($row['component']) ? [$row['component']] : (array) ($row['components'] ?? []) as $field) {
-                        $form[(string) ($field['custom_id'] ?? '')] = (string) ($field['value'] ?? '');
-                    }
-                }
-                $error = $this->save_one($session, $id, $draft + ['transport' => $form['transport'] ?? ''], $form['animation'] ?? null, $form['commentaire'] ?? null);
+                $form = self::form_values($payload);
+                $texts = ['transport' => self::value($form, 'transport'), 'comment' => self::value($form, 'commentaire')] + (isset($form['animation']) ? ['animation' => self::value($form, 'animation')] : []);
+                $error = $this->save_one($session, $id, ['role' => $draft['role'], 'days' => $draft['days'], 'travel' => $draft['travel'], 'slots' => $draft['slots'], 'transport' => $texts['transport']], $texts['animation'] ?? null, $texts['comment']);
                 if (null !== $error) {
+                    // Kept for the next try: nothing to type again.
+                    $this->save_draft($discord_id, $id, $texts + $draft);
                     return $show($this->volunteer_form($discord_id, $id, $error), 7);
                 }
                 delete_transient('nyassobi_vol_' . $discord_id . '_' . $id);
-                return $show(['content' => sprintf(__('✅ C\'est noté pour **%s**, merci ! Le CA choisit l\'équipe et te prévient en message privé. Tu peux modifier ou retirer ta proposition avec le même bouton.', 'nyassobi-wp-plugin'), Nyassobi_Membership::escape_markdown($c['name'])), 'components' => []], 7);
+                $done = [sprintf(__('✅ C\'est noté pour **%s**, merci ! Le CA choisit l\'équipe et te prévient en message privé. Tu peux modifier ou retirer ta proposition avec le même bouton.', 'nyassobi-wp-plugin'), Nyassobi_Membership::escape_markdown($c['name']))];
+                $description = $this->meta($id, self::META_DESCRIPTION);
+                if ('' !== $description) {
+                    $short = mb_strlen($description) > 400 ? mb_substr($description, 0, 399) . '…' : $description;
+                    $done[] = '> ' . str_replace("\n", "\n> ", Nyassobi_Membership::escape_markdown($short));
+                }
+                if ('' !== $this->meta($id, self::META_LINK)) {
+                    $done[] = '🔗 Site de la convention : ' . $this->meta($id, self::META_LINK);
+                }
+                $done[] = '📣 Infos et annonces : ' . $this->page_url();
+                return $show(['content' => implode("\n", $done), 'components' => []], 7);
 
             case 'withdraw':
                 $error = $this->save_one($session, $id, null, null, null);
@@ -1557,16 +1836,20 @@ final class Nyassobi_Conventions
      * Checks the bytes themselves (never the announced type), then files the
      * image in the media library, attached to the convention.
      *
+     * @param array<string,string> $types Accepted types: mime => extension.
+     *
      * @return int|string Attachment id, or an error message.
      */
-    private function store_image(int $convention_id, string $bytes, string $name)
+    private function store_image(int $convention_id, string $bytes, string $name, array $types = self::IMAGE_TYPES)
     {
         if ('' === $bytes || strlen($bytes) > self::IMAGE_MAX_BYTES) {
             return __('L\'image doit faire moins de 8 Mo.', 'nyassobi-wp-plugin');
         }
         $mime = (new \finfo(FILEINFO_MIME_TYPE))->buffer($bytes) ?: '';
-        if (! isset(self::IMAGE_TYPES[$mime])) {
-            return __('Seules les images JPEG, PNG, WebP ou GIF sont acceptées.', 'nyassobi-wp-plugin');
+        if (! isset($types[$mime])) {
+            return self::COMM_TYPES === $types
+                ? __('Seules les images PNG sont acceptées (fond transparent de préférence).', 'nyassobi-wp-plugin')
+                : __('Seules les images JPEG, PNG, WebP ou GIF sont acceptées.', 'nyassobi-wp-plugin');
         }
         require_once ABSPATH . 'wp-admin/includes/file.php';
         require_once ABSPATH . 'wp-admin/includes/media.php';
@@ -1574,7 +1857,7 @@ final class Nyassobi_Conventions
         $tmp = wp_tempnam($name);
         file_put_contents($tmp, $bytes);
         $base = sanitize_file_name((string) pathinfo($name, PATHINFO_FILENAME)) ?: 'image';
-        $attachment = media_handle_sideload(['name' => $base . '.' . self::IMAGE_TYPES[$mime], 'tmp_name' => $tmp], $convention_id);
+        $attachment = media_handle_sideload(['name' => $base . '.' . $types[$mime], 'tmp_name' => $tmp], $convention_id);
         if (is_wp_error($attachment)) {
             @unlink($tmp);
             error_log('[Nyassobi] Conventions : image refusée (' . $attachment->get_error_message() . ').');
@@ -1612,6 +1895,8 @@ final class Nyassobi_Conventions
 
     /**
      * Infos shown to members. null leaves a field as it is; "-" clears it.
+     * Everything is checked before anything changes: a refused form leaves
+     * the convention as it was, and the caller erases the added images.
      *
      * @param int[] $add_images
      */
@@ -1622,61 +1907,76 @@ final class Nyassobi_Conventions
             if (mb_strlen($description) > 2000) {
                 return __('La description doit tenir en 2 000 caractères.', 'nyassobi-wp-plugin');
             }
-            update_post_meta($id, self::META_DESCRIPTION, $description);
         }
         if (null !== $link) {
             $clear = '-' === trim($link) || '' === trim($link);
-            $clean = $clear ? '' : esc_url_raw(trim($link), ['http', 'https']);
-            if (! $clear && ! preg_match('#^https?://#', $clean)) {
+            $link = $clear ? '' : esc_url_raw(trim($link), ['http', 'https']);
+            if (! $clear && ! preg_match('#^https?://#', $link)) {
                 return __('Ce lien ne semble pas valide : il doit commencer par https://', 'nyassobi-wp-plugin');
             }
-            update_post_meta($id, self::META_LINK, $clean);
         }
-        $images = $this->images($id);
+        $online = $this->images($id);
+        $kept = $clear_images ? [] : $online;
+        if (count($kept) + count($add_images) > self::MAX_IMAGES) {
+            return $kept
+                ? sprintf(__('%1$d images au plus, et il y en a déjà %2$d : retire-les d\'abord.', 'nyassobi-wp-plugin'), self::MAX_IMAGES, count($kept))
+                : sprintf(__('%d images au plus.', 'nyassobi-wp-plugin'), self::MAX_IMAGES);
+        }
+
+        if (null !== $description) {
+            update_post_meta($id, self::META_DESCRIPTION, $description);
+        }
+        if (null !== $link) {
+            update_post_meta($id, self::META_LINK, $link);
+        }
         if ($clear_images) {
-            foreach ($images as $image) {
+            foreach ($online as $image) {
                 wp_delete_attachment($image, true);
             }
-            $images = [];
         }
-        foreach ($add_images as $image) {
-            if (count($images) >= self::MAX_IMAGES) {
-                wp_delete_attachment($image, true);
-                return sprintf(__('%d images au plus : retire-en d\'abord.', 'nyassobi-wp-plugin'), self::MAX_IMAGES);
-            }
-            $images[] = $image;
-        }
-        update_post_meta($id, self::META_IMAGES, $images);
+        update_post_meta($id, self::META_IMAGES, array_merge($kept, $add_images));
         $this->update_summary();
 
         return null;
     }
 
     /**
-     * Posts a message with an image file attached, so it shows even when the
+     * Posts a message with image files attached, so they show even when the
      * WordPress address is not reachable by Discord (test setup).
      *
      * @param array<string,mixed> $payload
+     * @param int[]               $attachments
      *
      * @return array<string,mixed>|null
      */
-    private function discord_post_with_image(string $channel, array $payload, int $attachment): ?array
+    private function discord_post_with_files(string $channel, array $payload, array $attachments): ?array
     {
         $path = '/channels/' . rawurlencode($channel) . '/messages';
-        $file = $attachment ? (string) get_attached_file($attachment) : '';
-        if ('' === $file || ! is_readable($file)) {
+        $files = [];
+        foreach ($attachments as $attachment) {
+            $file = $attachment ? (string) get_attached_file($attachment) : '';
+            if ('' !== $file && is_readable($file)) {
+                $files[] = [$attachment, $file];
+            }
+        }
+        if (! $files) {
             return Nyassobi_Membership::instance()->discord_request('POST', $path, $payload);
         }
-        $name = sanitize_file_name(wp_basename($file));
-        $payload['attachments'] = [['id' => 0, 'filename' => $name]];
-        if (isset($payload['embeds'][0])) {
-            $payload['embeds'][0]['image'] = ['url' => 'attachment://' . $name];
-        }
         $boundary = 'nyassobi' . bin2hex(random_bytes(8));
+        $parts = '';
+        $payload['attachments'] = [];
+        foreach ($files as $i => [$attachment, $file]) {
+            $name = sanitize_file_name(wp_basename($file));
+            $payload['attachments'][] = ['id' => $i, 'filename' => $name];
+            $parts .= "--$boundary\r\nContent-Disposition: form-data; name=\"files[$i]\"; filename=\"$name\"\r\nContent-Type: " . (string) get_post_mime_type($attachment) . "\r\n\r\n" . (string) file_get_contents($file) . "\r\n";
+        }
+        if (isset($payload['embeds'][0])) {
+            $payload['embeds'][0]['image'] = ['url' => 'attachment://' . $payload['attachments'][0]['filename']];
+        }
         $body = "--$boundary\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n" . wp_json_encode($payload) . "\r\n"
-            . "--$boundary\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"$name\"\r\nContent-Type: " . (string) get_post_mime_type($attachment) . "\r\n\r\n" . (string) file_get_contents($file) . "\r\n--$boundary--\r\n";
+            . $parts . "--$boundary--\r\n";
         $response = wp_remote_post('https://discord.com/api/v10' . $path, [
-            'timeout' => 20,
+            'timeout' => 60,
             'user-agent' => 'DiscordBot (https://nyassobi.fr, 1.0)',
             'headers' => ['Authorization' => 'Bot ' . ($this->settings()['discord_bot_token'] ?? ''), 'Content-Type' => 'multipart/form-data; boundary=' . $boundary],
             'body' => $body,
@@ -1764,12 +2064,12 @@ final class Nyassobi_Conventions
             if ($mention) {
                 $content .= "\n\n<@&" . $role . '>';
             }
-            $posted = $this->discord_post_with_image($channel, [
+            $posted = $this->discord_post_with_files($channel, [
                 'content' => mb_substr($content, 0, 2000),
                 'components' => $c['open'] ? [['type' => 1, 'components' => [['type' => 2, 'style' => 1, 'label' => '🙋 Je me propose', 'custom_id' => 'nyvol:start:' . $id]]]] : [],
                 // Only the member role may ring, never @everyone typed by mistake.
                 'allowed_mentions' => $mention ? ['roles' => [$role]] : ['parse' => []],
-            ], $image);
+            ], $image ? [$image] : []);
             $item['message'] = (string) ($posted['id'] ?? '');
             $item['channel'] = $channel;
         }
@@ -1818,9 +2118,11 @@ final class Nyassobi_Conventions
             ? sprintf("🎉 Bonne nouvelle ! Tu es retenu·e pour **%s** (%s), en %s%s.\nLe CA te recontacte bientôt avec les détails : horaires, rendez-vous, défraiement.\nInfos et annonces : %s\n\n— Le CA de Nyassobi", $c['name'], $where, 'staff' === $person['role'] ? 'staff du stand' : 'animation', '' !== $days ? ' (' . $days . ')' : '', $this->page_url())
             : sprintf("Merci beaucoup pour ta proposition pour **%s** (%s) ! Cette fois, on n'a pas pu te retenir dans l'équipe, mais d'autres conventions arrivent : n'hésite surtout pas à te proposer à nouveau.\n%s\n\n— Le CA de Nyassobi", $c['name'], $where, $this->page_url());
 
-        $discord = Nyassobi_Membership::instance();
-        $dm = $discord->discord_request('POST', '/users/@me/channels', ['recipient_id' => $discord_id]);
-        $sent = isset($dm['id']) && null !== $discord->discord_request('POST', '/channels/' . rawurlencode((string) $dm['id']) . '/messages', ['content' => $text, 'allowed_mentions' => ['parse' => []]]);
+        $message = ['content' => $text, 'allowed_mentions' => ['parse' => []]];
+        if ($this->is_selected_animator($id, $discord_id) && ! isset($this->comm($id)[$discord_id])) {
+            $message = $this->comm_request($id, $text);
+        }
+        $sent = $this->send_dm($discord_id, $message);
         if ($sent) {
             $notes[$discord_id]['notified'] = $status;
             update_post_meta($id, self::META_NOTES, $notes);
@@ -1855,6 +2157,259 @@ final class Nyassobi_Conventions
         $this->update_recap($id);
 
         return null;
+    }
+
+    /** @param array<string,mixed> $message */
+    private function send_dm(string $discord_id, array $message): bool
+    {
+        $discord = Nyassobi_Membership::instance();
+        $dm = $discord->discord_request('POST', '/users/@me/channels', ['recipient_id' => $discord_id]);
+
+        return isset($dm['id']) && null !== $discord->discord_request('POST', '/channels/' . rawurlencode((string) $dm['id']) . '/messages', $message);
+    }
+
+    /* ------------------------------------------------------------------
+     * Communication: what the selected animators send
+     * ------------------------------------------------------------------ */
+
+    /** @return array<string,array{pronouns:string,languages:string,images:int[],date:int,messages:string[]}> */
+    private function comm(int $id): array
+    {
+        $comm = get_post_meta($id, self::META_COMM, true);
+
+        return is_array($comm) ? $comm : [];
+    }
+
+    /** Only animators the CA kept are asked: staff need nothing for the communication. */
+    private function is_selected_animator(int $id, string $discord_id): bool
+    {
+        if (! ctype_digit($discord_id) || 'retenu' !== ($this->notes($id)[$discord_id]['status'] ?? '')) {
+            return false;
+        }
+        foreach ($this->volunteers($id) as $p) {
+            if ($p['discord_id'] === $discord_id) {
+                return 'animation' === $p['role'];
+            }
+        }
+
+        return false;
+    }
+
+    /** Link to the message with the images, in the organisers' channel. */
+    private function comm_link(array $entry): string
+    {
+        $guild = (string) ($this->settings()['discord_guild_id'] ?? '');
+        $channel = (string) ($this->settings()['conventions_channel_id'] ?? '');
+        $message = (string) (((array) ($entry['messages'] ?? []))[0] ?? '');
+
+        return '' !== $guild && '' !== $channel && '' !== $message ? sprintf('https://discord.com/channels/%s/%s/%s', $guild, $channel, $message) : '';
+    }
+
+    /**
+     * The private message asking for the communication infos, with the
+     * button that opens the form.
+     *
+     * @return array<string,mixed>
+     */
+    private function comm_request(int $id, string $before = ''): array
+    {
+        $text = sprintf(
+            "Pour préparer la comm de **%s**, il nous faut :\n• des images PNG de ton model (fond transparent de préférence)\n• tes pronoms\n• les langues que tu parles\nLe bouton ci-dessous ouvre le formulaire, tu peux y revenir pour corriger. Tout est effacé 30 jours après la convention.",
+            Nyassobi_Membership::escape_markdown($this->convention($id)['name'])
+        );
+
+        return [
+            'content' => ('' !== $before ? $before . "\n\n" : '') . $text,
+            'components' => [['type' => 1, 'components' => [['type' => 2, 'style' => 1, 'label' => '🖼️ Envoyer mes infos pour la comm', 'custom_id' => 'nycomm:open:' . $id]]]],
+            'allowed_mentions' => ['parse' => []],
+        ];
+    }
+
+    /** For a person already told they were kept, without the request. */
+    private function ask_comm(int $id, string $discord_id): bool
+    {
+        return $this->is_selected_animator($id, $discord_id) && $this->send_dm($discord_id, $this->comm_request($id));
+    }
+
+    /**
+     * Saves what an animator sent. New images replace the previous ones; the
+     * message in the organisers' channel is posted again.
+     *
+     * @param int[] $images Already in the media library; erased if refused.
+     */
+    private function set_comm(int $id, string $discord_id, string $pronouns, string $languages, array $images): ?string
+    {
+        $all = $this->comm($id);
+        $old = $all[$discord_id] ?? null;
+        $pronouns = mb_substr(sanitize_text_field($pronouns), 0, 40);
+        $languages = mb_substr(sanitize_text_field($languages), 0, 100);
+        $error = null;
+        if (! $this->is_selected_animator($id, $discord_id)) {
+            $error = __('Ce formulaire est réservé aux animateurs retenus pour cette convention.', 'nyassobi-wp-plugin');
+        } elseif ('' === $pronouns || '' === $languages) {
+            $error = __('Indique tes pronoms et les langues que tu parles.', 'nyassobi-wp-plugin');
+        } elseif (! $images && empty($old['images'])) {
+            $error = __('Envoie au moins une image PNG de ton model.', 'nyassobi-wp-plugin');
+        }
+        if (null !== $error) {
+            foreach ($images as $image) {
+                wp_delete_attachment($image, true);
+            }
+
+            return $error;
+        }
+        if ($images && null !== $old) {
+            foreach ($old['images'] as $gone) {
+                wp_delete_attachment((int) $gone, true);
+            }
+        }
+        $all[$discord_id] = [
+            'pronouns' => $pronouns,
+            'languages' => $languages,
+            'images' => $images ?: $old['images'],
+            'date' => time(),
+            'messages' => $old['messages'] ?? [],
+        ];
+        update_post_meta($id, self::META_COMM, $all);
+        $this->post_comm($id, $discord_id);
+        $this->update_recap($id);
+
+        return null;
+    }
+
+    /**
+     * The infos and images in the organisers' channel, as a reply to the
+     * convention's recap. Images go in groups below Discord's upload limit.
+     */
+    private function post_comm(int $id, string $discord_id): void
+    {
+        $all = $this->comm($id);
+        $entry = $all[$discord_id] ?? null;
+        $channel = (string) ($this->settings()['conventions_channel_id'] ?? '');
+        if (null === $entry) {
+            return;
+        }
+        $discord = Nyassobi_Membership::instance();
+        foreach ((array) ($entry['messages'] ?? []) as $old) {
+            if ('' !== $channel) {
+                $discord->discord_request('DELETE', '/channels/' . rawurlencode($channel) . '/messages/' . rawurlencode((string) $old));
+            }
+        }
+        $entry['messages'] = [];
+        if ('' !== $channel) {
+            $md = static fn (string $t): string => Nyassobi_Membership::escape_markdown($t);
+            $name = array_column($this->volunteers($id), 'name', 'discord_id')[$discord_id] ?? '';
+            $text = sprintf("🖼️ **Infos pour la comm** · %s\n**%s** <@%s> · pronoms : %s · langues : %s", $md($this->convention($id)['name']), $md($name), $discord_id, $md($entry['pronouns']), $md($entry['languages']));
+            $groups = [[]];
+            $size = 0;
+            foreach ($entry['images'] as $image) {
+                $bytes = (int) @filesize((string) get_attached_file((int) $image));
+                if ($groups[count($groups) - 1] && $size + $bytes > self::DISCORD_UPLOAD_BYTES) {
+                    $groups[] = [];
+                    $size = 0;
+                }
+                $groups[count($groups) - 1][] = (int) $image;
+                $size += $bytes;
+            }
+            $recap = $this->meta($id, self::META_MESSAGE);
+            foreach ($groups as $n => $group) {
+                $payload = ['content' => 0 === $n ? $text : '', 'allowed_mentions' => ['parse' => []]];
+                if (0 === $n && '' !== $recap) {
+                    $payload['message_reference'] = ['message_id' => $recap, 'fail_if_not_exists' => false];
+                }
+                $posted = $this->discord_post_with_files($channel, $payload, $group);
+                if (null === $posted && 0 === $n) {
+                    // Images refused by Discord (too heavy): the text still goes.
+                    $posted = $discord->discord_request('POST', '/channels/' . rawurlencode($channel) . '/messages', ['content' => $text . "\nImages trop lourdes pour Discord : elles sont dans WordPress, fiche de la convention.", 'allowed_mentions' => ['parse' => []]]);
+                }
+                if (isset($posted['id'])) {
+                    $entry['messages'][] = (string) $posted['id'];
+                }
+            }
+        }
+        $all[$discord_id] = $entry;
+        update_post_meta($id, self::META_COMM, $all);
+    }
+
+    /** When someone withdraws: their images and the CA's message go too. */
+    private function forget_comm(int $id, string $discord_id): void
+    {
+        $all = $this->comm($id);
+        if (! isset($all[$discord_id])) {
+            return;
+        }
+        foreach ($all[$discord_id]['images'] as $image) {
+            wp_delete_attachment((int) $image, true);
+        }
+        $channel = (string) ($this->settings()['conventions_channel_id'] ?? '');
+        foreach ((array) ($all[$discord_id]['messages'] ?? []) as $message) {
+            if ('' !== $channel) {
+                Nyassobi_Membership::instance()->discord_request('DELETE', '/channels/' . rawurlencode($channel) . '/messages/' . rawurlencode((string) $message));
+            }
+        }
+        unset($all[$discord_id]);
+        update_post_meta($id, self::META_COMM, $all);
+    }
+
+    /**
+     * The button in the private message, and the form it opens. Clicked in
+     * private messages, so no roles: being kept by the CA is the check.
+     *
+     * @param \WP_REST_Response|null $response
+     * @param array<string,mixed>     $payload
+     *
+     * @return \WP_REST_Response|null
+     */
+    public function handle_comm($response, array $payload)
+    {
+        $custom_id = (string) ($payload['data']['custom_id'] ?? '');
+        if (null !== $response || 0 !== strpos($custom_id, 'nycomm:')) {
+            return $response;
+        }
+        $membership = Nyassobi_Membership::instance();
+        $user = (string) ($payload['user']['id'] ?? ($payload['member']['user']['id'] ?? ''));
+        $parts = explode(':', $custom_id);
+        $action = $parts[1] ?? '';
+        $id = (int) ($parts[2] ?? 0);
+        if (! $this->is_upcoming($id)) {
+            return $membership->ephemeral(__('Cette convention est terminée ou n\'existe plus.', 'nyassobi-wp-plugin'));
+        }
+        if (! $this->is_selected_animator($id, $user)) {
+            return $membership->ephemeral(__('Ce formulaire est réservé aux animateurs retenus pour cette convention.', 'nyassobi-wp-plugin'));
+        }
+        $form = 'nycomm:open:' . $id;
+
+        if ('open' === $action) {
+            $kept = self::kept_form($user, $form);
+            $entry = $this->comm($id)[$user] ?? [];
+            $count = count((array) ($entry['images'] ?? []));
+            $upload = self::files('images', self::COMM_MAX_IMAGES);
+            if (! $count) {
+                $upload = ['min_values' => 1, 'required' => true] + $upload;
+            }
+
+            return self::modal('nycomm:send:' . $id, 'Infos pour la comm', [
+                self::field('Tes pronoms', self::text('pronoms', false, true, 40, self::value($kept, 'pronoms', (string) ($entry['pronouns'] ?? '')), 'elle, il, iel…')),
+                self::field('Les langues que tu parles', self::text('langues', false, true, 100, self::value($kept, 'langues', (string) ($entry['languages'] ?? '')), 'Français, anglais…')),
+                self::field('Images PNG de ton model', $upload, $count
+                    ? sprintf('Tu en as déjà envoyé %d : en mettre de nouvelles les remplace', $count)
+                    : sprintf('Fond transparent de préférence, %d au plus, 8 Mo chacune', self::COMM_MAX_IMAGES)),
+            ]);
+        }
+        if ('send' === $action) {
+            $values = self::form_values($payload);
+            $kept = ['pronoms' => self::value($values, 'pronoms'), 'langues' => self::value($values, 'langues')];
+
+            return $this->later('comm', $kept + [
+                'convention' => (string) $id,
+                '_attachments' => wp_json_encode(self::sent_files($payload, (array) ($values['images'] ?? []))),
+                '_user' => $user,
+                '_form' => $form,
+                '_kept' => wp_json_encode($kept),
+            ], $payload, false);
+        }
+
+        return $membership->ephemeral(__('Action inconnue.', 'nyassobi-wp-plugin'));
     }
 
     /* ------------------------------------------------------------------
@@ -2183,7 +2738,7 @@ final class Nyassobi_Conventions
 
     public function render_infos(\WP_Post $post): void
     {
-        echo '<p class="description">' . esc_html__('Visible sur la page Conventions du site. Le CA peut aussi le faire sur Discord avec /convention-infos.', 'nyassobi-wp-plugin') . '</p>';
+        echo '<p class="description">' . esc_html__('Visible sur la page Conventions du site. Le CA peut aussi le faire sur Discord, avec le bouton 📝 Infos sous le récapitulatif.', 'nyassobi-wp-plugin') . '</p>';
         printf('<p><label for="nyassobi_conv_description"><strong>%s</strong></label><br><textarea id="nyassobi_conv_description" name="nyassobi_conv_description" rows="5" class="large-text" maxlength="2000">%s</textarea></p>', esc_html__('Description (horaires, stand, ce qu\'on attend des bénévoles…)', 'nyassobi-wp-plugin'), esc_textarea($this->meta($post->ID, self::META_DESCRIPTION)));
         printf('<p><label for="nyassobi_conv_lien"><strong>%s</strong></label><br><input type="url" id="nyassobi_conv_lien" name="nyassobi_conv_lien" value="%s" class="large-text" placeholder="https://"></p>', esc_html__('Site de la convention', 'nyassobi-wp-plugin'), esc_attr($this->meta($post->ID, self::META_LINK)));
         $images = $this->images($post->ID);
@@ -2227,18 +2782,29 @@ final class Nyassobi_Conventions
         }
         echo '<table class="widefat striped"><thead><tr>';
         $notes = $this->notes($post->ID);
-        foreach ([__('Pseudo', 'nyassobi-wp-plugin'), __('Rôle', 'nyassobi-wp-plugin'), __('Jours', 'nyassobi-wp-plugin'), __('Trajet', 'nyassobi-wp-plugin'), __('Transport', 'nyassobi-wp-plugin'), __('Horaires préférés', 'nyassobi-wp-plugin'), __('Animation proposée', 'nyassobi-wp-plugin'), __('Commentaire', 'nyassobi-wp-plugin'), __('Décision du CA', 'nyassobi-wp-plugin'), __('Note du CA', 'nyassobi-wp-plugin')] as $label) {
+        foreach ([__('Pseudo', 'nyassobi-wp-plugin'), __('Rôle', 'nyassobi-wp-plugin'), __('Jours', 'nyassobi-wp-plugin'), __('Trajet', 'nyassobi-wp-plugin'), __('Transport', 'nyassobi-wp-plugin'), __('Horaires préférés', 'nyassobi-wp-plugin'), __('Animation proposée', 'nyassobi-wp-plugin'), __('Commentaire', 'nyassobi-wp-plugin'), __('Décision du CA', 'nyassobi-wp-plugin'), __('Note du CA', 'nyassobi-wp-plugin'), __('Infos pour la comm', 'nyassobi-wp-plugin')] as $label) {
             echo '<th>' . esc_html($label) . '</th>';
         }
         echo '</tr></thead><tbody>';
+        $comm = $this->comm($post->ID);
         foreach ($people as $p) {
             $note = $notes[$p['discord_id']] ?? ['status' => '', 'note' => ''];
+            $entry = $comm[$p['discord_id']] ?? null;
+            $comm_cell = '';
+            if (null !== $entry) {
+                $comm_cell = esc_html(sprintf(__('Pronoms : %1$s · Langues : %2$s', 'nyassobi-wp-plugin'), $entry['pronouns'], $entry['languages'])) . '<br>';
+                foreach ($entry['images'] as $image) {
+                    $comm_cell .= sprintf('<a href="%s" target="_blank" rel="noopener"><img src="%s" alt="" style="width:64px;height:64px;object-fit:contain;margin:4px 4px 0 0;background:#eee;border-radius:4px"></a>', esc_url((string) wp_get_attachment_url((int) $image)), esc_url((string) wp_get_attachment_image_url((int) $image, 'thumbnail')));
+                }
+            } elseif ($this->is_selected_animator($post->ID, $p['discord_id'])) {
+                $comm_cell = esc_html__('En attente', 'nyassobi-wp-plugin');
+            }
             $select = '<select name="nyassobi_conv_notes[' . esc_attr($p['discord_id']) . '][status]"><option value="">—</option>';
             foreach (self::STATUSES as $value => $label) {
                 $select .= sprintf('<option value="%s"%s>%s</option>', esc_attr($value), selected($note['status'], $value, false), esc_html($label));
             }
             $select .= '</select>';
-            printf('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><input type="text" name="nyassobi_conv_notes[%s][note]" value="%s" maxlength="300" class="regular-text"></td></tr>', esc_html($p['name']), esc_html(self::ROLES[$p['role']] ?? $p['role']), esc_html($this->days_text($post->ID, $p['days']) ?: '—'), esc_html(self::TRAVEL[$p['travel']] ?? $p['travel']), esc_html($p['transport']), esc_html(self::slots_text($p['slots'])), 'staff' !== $p['role'] ? esc_html($p['animation']) : '', esc_html($p['comment']), $select, esc_attr($p['discord_id']), esc_attr($note['note']));
+            printf('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><input type="text" name="nyassobi_conv_notes[%s][note]" value="%s" maxlength="300" class="regular-text"></td><td>%s</td></tr>', esc_html($p['name']), esc_html(self::ROLES[$p['role']] ?? $p['role']), esc_html($this->days_text($post->ID, $p['days']) ?: '—'), esc_html(self::TRAVEL[$p['travel']] ?? $p['travel']), esc_html($p['transport']), esc_html(self::slots_text($p['slots'])), 'staff' !== $p['role'] ? esc_html($p['animation']) : '', esc_html($p['comment']), $select, esc_attr($p['discord_id']), esc_attr($note['note']), $comm_cell);
         }
         echo '</tbody></table>';
         printf('<p class="description">%s</p>', esc_html__('Décision et note restent internes au CA : elles apparaissent dans le récapitulatif des orgas, jamais pour le volontaire.', 'nyassobi-wp-plugin'));
@@ -2287,16 +2853,25 @@ final class Nyassobi_Conventions
                 $new_images[] = $stored;
             }
         }
-        $this->set_info($post_id, (string) wp_unslash($_POST['nyassobi_conv_description'] ?? ''), (string) wp_unslash($_POST['nyassobi_conv_lien'] ?? ''), $new_images, false);
+        if (null !== $this->set_info($post_id, (string) wp_unslash($_POST['nyassobi_conv_description'] ?? ''), (string) wp_unslash($_POST['nyassobi_conv_lien'] ?? ''), $new_images, false)) {
+            // Refused (bad link, too many images): nothing changed, so the
+            // new files must not stay in the media library.
+            foreach ($new_images as $image) {
+                wp_delete_attachment($image, true);
+            }
+        }
 
         $notes = $this->notes($post_id);
         foreach ((array) ($_POST['nyassobi_conv_notes'] ?? []) as $discord_id => $entry) {
             if (ctype_digit((string) $discord_id) && is_array($entry)) {
                 $status = (string) ($entry['status'] ?? '');
+                $status = isset(self::STATUSES[$status]) ? $status : '';
+                $before = $notes[(string) $discord_id] ?? [];
+                // « Prévenu·e » stays, unless the decision changed.
                 $notes[(string) $discord_id] = [
-                    'status' => isset(self::STATUSES[$status]) ? $status : '',
+                    'status' => $status,
                     'note' => mb_substr(sanitize_text_field((string) wp_unslash($entry['note'] ?? '')), 0, 300),
-                ];
+                ] + ($status === ($before['status'] ?? '') && ! empty($before['notified']) ? ['notified' => $before['notified']] : []);
             }
         }
         update_post_meta($post_id, self::META_NOTES, $notes);
@@ -2375,10 +2950,12 @@ final class Nyassobi_Conventions
             wp_die(esc_html__('Action non autorisée.', 'nyassobi-wp-plugin'));
         }
         $notes = $this->notes($id);
-        $rows = [['Pseudo', 'Rôle', 'Jours', 'Trajet', 'Transport', 'Horaires préférés', 'Animation proposée', 'Commentaire', 'Décision du CA', 'Note du CA']];
+        $comm = $this->comm($id);
+        $rows = [['Pseudo', 'Rôle', 'Jours', 'Trajet', 'Transport', 'Horaires préférés', 'Animation proposée', 'Commentaire', 'Décision du CA', 'Note du CA', 'Pronoms', 'Langues', 'Images pour la comm']];
         foreach ($this->volunteers($id) as $p) {
             $note = $notes[$p['discord_id']] ?? [];
-            $rows[] = [$p['name'], self::ROLES[$p['role']] ?? $p['role'], implode(', ', array_map([self::class, 'day_label'], $p['days'])), self::TRAVEL[$p['travel']] ?? $p['travel'], $p['transport'], self::slots_text($p['slots']), 'staff' !== $p['role'] ? $p['animation'] : '', $p['comment'], self::STATUSES[$note['status'] ?? ''] ?? '', (string) ($note['note'] ?? '')];
+            $entry = $comm[$p['discord_id']] ?? ['pronouns' => '', 'languages' => '', 'images' => []];
+            $rows[] = [$p['name'], self::ROLES[$p['role']] ?? $p['role'], implode(', ', array_map([self::class, 'day_label'], $p['days'])), self::TRAVEL[$p['travel']] ?? $p['travel'], $p['transport'], self::slots_text($p['slots']), 'staff' !== $p['role'] ? $p['animation'] : '', $p['comment'], self::STATUSES[$note['status'] ?? ''] ?? '', (string) ($note['note'] ?? ''), $entry['pronouns'], $entry['languages'], implode(' ', array_map(static fn ($image): string => (string) wp_get_attachment_url((int) $image), $entry['images']))];
         }
         nocache_headers();
         header('Content-Type: text/csv; charset=UTF-8');
@@ -2412,7 +2989,10 @@ final class Nyassobi_Conventions
         foreach ($this->news($post_id) as $item) {
             $this->remove_news($post_id, $item['id']);
         }
-        // Posters, photos and announcement images go with the convention.
+        foreach (array_keys($this->comm($post_id)) as $discord_id) {
+            $this->forget_comm($post_id, (string) $discord_id);
+        }
+        // Posters, photos, announcement and model images go with the convention.
         foreach (get_children(['post_parent' => $post_id, 'post_type' => 'attachment', 'fields' => 'ids']) as $attachment) {
             wp_delete_attachment((int) $attachment, true);
         }
