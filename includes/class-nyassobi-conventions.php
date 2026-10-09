@@ -5,8 +5,8 @@
  * Flow: the CA lists the season's conventions (in WordPress, or with slash
  * commands on Discord). Members sign in on the site with Discord, which
  * proves they hold the "Adhérent" role, and say for each convention whether
- * they can come as staff, to run an animation, or both, with their travel
- * time. Each convention has a recap message in a private Discord channel,
+ * they can come as stand staff (with their travel time) or run an animation
+ * (done remotely). Each convention has a recap message in a private Discord channel,
  * updated on every answer, so the CA can pick the best-suited people.
  *
  * Privacy: only the Discord account, the roles, travel times (never a town)
@@ -494,11 +494,12 @@ final class Nyassobi_Conventions
             if (! in_array($role, $allowed, true)) {
                 return sprintf(__('Choisis ton rôle pour %s.', 'nyassobi-wp-plugin'), $convention['name']);
             }
-            $travel = (string) ($raw['travel'] ?? '');
-            if (! isset(self::TRAVEL[$travel])) {
+            // Animations are done remotely: no travel for them.
+            $travel = 'staff' === $role ? (string) ($raw['travel'] ?? '') : '';
+            if ('staff' === $role && ! isset(self::TRAVEL[$travel])) {
                 return sprintf(__('Indique ton temps de trajet pour %s.', 'nyassobi-wp-plugin'), $convention['name']);
             }
-            $transport = sanitize_text_field((string) ($raw['transport'] ?? ''));
+            $transport = 'staff' === $role ? sanitize_text_field((string) ($raw['transport'] ?? '')) : '';
             if (mb_strlen($transport) > 80) {
                 return __('Le moyen de transport doit tenir en 80 caractères.', 'nyassobi-wp-plugin');
             }
@@ -571,6 +572,17 @@ final class Nyassobi_Conventions
         return implode(', ', array_map([self::class, 'day_label'], $days));
     }
 
+    /** « 🚗 moins de 2 h, train » for the stand, « 💻 à distance » for an animation. */
+    private static function travel_text(array $person, bool $markdown = true): string
+    {
+        if ('staff' !== $person['role']) {
+            return '💻 à distance';
+        }
+        $transport = (string) ($person['transport'] ?? '');
+
+        return '🚗 ' . (self::TRAVEL[$person['travel']] ?? $person['travel']) . ('' !== $transport ? ', ' . ($markdown ? Nyassobi_Membership::escape_markdown($transport) : $transport) : '');
+    }
+
     /** « matin, après-midi » */
     private static function slots_text(array $slots): string
     {
@@ -634,14 +646,13 @@ final class Nyassobi_Conventions
         $blocks = [];
         foreach ($people as $p) {
             $note = $notes[$p['discord_id']] ?? [];
-            $block = sprintf('%s**%s** <@%s> · %s%s · 🚗 %s%s%s%s%s',
+            $block = sprintf('%s**%s** <@%s> · %s%s · %s%s%s%s',
                 isset(self::STATUSES[$note['status'] ?? '']) ? mb_substr(self::STATUSES[$note['status']], 0, 1) . ' ' : '',
                 $md($p['name']),
                 $p['discord_id'],
                 self::ROLES[$p['role']] ?? $p['role'],
                 '' !== $this->days_text($id, $p['days']) ? ' · 📅 ' . $this->days_text($id, $p['days']) : '',
-                self::TRAVEL[$p['travel']] ?? $p['travel'],
-                '' !== $p['transport'] ? ', ' . $md($p['transport']) : '',
+                self::travel_text($p),
                 $p['slots'] ? ' · 🕐 ' . self::slots_text($p['slots']) : '',
                 ! empty($note['notified']) ? ' · ✉️ prévenu·e' : '',
                 isset($comm[$p['discord_id']]) ? ' · 🖼️ comm reçue' : ('retenu' === ($note['status'] ?? '') && 'animation' === $p['role'] ? ' · 🖼️ comm en attente' : '')
@@ -714,7 +725,7 @@ final class Nyassobi_Conventions
                 $options[] = [
                     'label' => mb_substr($p['name'], 0, 100) ?: 'Sans pseudo',
                     'value' => $p['discord_id'],
-                    'description' => mb_substr((self::ROLES[$p['role']] ?? '') . ('' !== $this->days_text($id, $p['days']) ? ' · ' . $this->days_text($id, $p['days']) : '') . ' · ' . (self::TRAVEL[$p['travel']] ?? '') . ('' !== $status ? ' · ' . $status : ''), 0, 100),
+                    'description' => mb_substr((self::ROLES[$p['role']] ?? '') . ('' !== $this->days_text($id, $p['days']) ? ' · ' . $this->days_text($id, $p['days']) : '') . ' · ' . ('staff' === $p['role'] ? (self::TRAVEL[$p['travel']] ?? '') : 'à distance') . ('' !== $status ? ' · ' . $status : ''), 0, 100),
                 ];
             }
             $placeholder = count($chunks) > 1
@@ -1361,7 +1372,7 @@ final class Nyassobi_Conventions
         $md = static fn (string $t): string => Nyassobi_Membership::escape_markdown($t);
         $lines = [
             sprintf('**%s** <@%s> · %s', $md($person['name']), $discord_id, $md($this->convention($id)['name'])),
-            sprintf('%s%s · 🚗 %s%s%s', self::ROLES[$person['role']] ?? '', '' !== $this->days_text($id, $person['days']) ? ' · 📅 ' . $this->days_text($id, $person['days']) : '', self::TRAVEL[$person['travel']] ?? '', '' !== $person['transport'] ? ', ' . $md($person['transport']) : '', $person['slots'] ? ' · 🕐 ' . self::slots_text($person['slots']) : ''),
+            sprintf('%s%s · %s%s', self::ROLES[$person['role']] ?? '', '' !== $this->days_text($id, $person['days']) ? ' · 📅 ' . $this->days_text($id, $person['days']) : '', self::travel_text($person), $person['slots'] ? ' · 🕐 ' . self::slots_text($person['slots']) : ''),
         ];
         if ('staff' !== $person['role'] && '' !== $person['animation']) {
             $lines[] = '🎤 ' . $md(mb_substr($person['animation'], 0, 500));
@@ -1626,7 +1637,7 @@ final class Nyassobi_Conventions
         $summary = [
             'Rôle' => self::ROLES[$draft['role']] ?? '',
             'Jours' => $several_days ? $this->days_text($id, $draft['days']) : null,
-            'Trajet' => self::TRAVEL[$draft['travel']] ?? '',
+            'Trajet' => 'staff' === $draft['role'] ? (self::TRAVEL[$draft['travel']] ?? '') : null,
             'Horaires' => 'animation' === $draft['role'] ? self::slots_text($draft['slots']) : null,
         ];
         $parts = [];
@@ -1636,6 +1647,9 @@ final class Nyassobi_Conventions
             }
         }
         $lines[] = '📋 ' . implode(' · ', $parts);
+        if ('animation' === $draft['role']) {
+            $lines[] = '💻 Les animations se font à distance : pas de trajet à prévoir.';
+        }
         if ('' !== $error) {
             $lines[] = '⚠️ ' . $error;
         }
@@ -1655,7 +1669,9 @@ final class Nyassobi_Conventions
         if (count($days) > 1) {
             $rows[] = $select('nyvol:days:' . $id, 'Les jours où je peux venir…', array_combine($days, array_map(static fn ($d) => self::day_label($d, true), $days)), $draft['days'], count($days));
         }
-        $rows[] = $select('nyvol:travel:' . $id, 'Mon temps de trajet…', array_map('ucfirst', self::TRAVEL), [$draft['travel']]);
+        if ('staff' === $draft['role']) {
+            $rows[] = $select('nyvol:travel:' . $id, 'Mon temps de trajet jusqu\'au stand…', array_map('ucfirst', self::TRAVEL), [$draft['travel']]);
+        }
         if ('animation' === $draft['role']) {
             $rows[] = $select('nyvol:slots:' . $id, 'Mes horaires préférés pour animer…', array_map('ucfirst', self::SLOTS), $draft['slots'], count(self::SLOTS));
         }
@@ -1756,14 +1772,17 @@ final class Nyassobi_Conventions
                 return $show($this->volunteer_form($discord_id, $id), 7);
 
             case 'next':
-                $missing = '' === $draft['role'] ? 'ton rôle' : ('' === $draft['travel'] ? 'ton temps de trajet' : (! $draft['days'] ? 'au moins un jour' : ('animation' === $draft['role'] && ! $draft['slots'] ? 'tes horaires préférés' : '')));
+                $missing = '' === $draft['role'] ? 'ton rôle' : ('staff' === $draft['role'] && '' === $draft['travel'] ? 'ton temps de trajet' : (! $draft['days'] ? 'au moins un jour' : ('animation' === $draft['role'] && ! $draft['slots'] ? 'tes horaires préférés' : '')));
                 if ('' !== $missing) {
                     return $show($this->volunteer_form($discord_id, $id, 'Choisis ' . $missing . '.'), 7);
                 }
                 $choice = $rid ? ($this->choices($rid)[$id] ?? []) : [];
                 // What was typed in a refused form comes first, then what is saved.
                 $typed = static fn (string $key, string $saved): string => (string) ($draft[$key] ?? $saved);
-                $fields = [self::field('Moyen de transport', self::text('transport', false, false, 80, $typed('transport', (string) ($choice['transport'] ?? '')), 'Train, voiture, covoiturage…'), 'Facultatif')];
+                $fields = [];
+                if ('staff' === $draft['role']) {
+                    $fields[] = self::field('Moyen de transport', self::text('transport', false, false, 80, $typed('transport', (string) ($choice['transport'] ?? '')), 'Train, voiture, covoiturage…'), 'Facultatif');
+                }
                 if ('animation' === $draft['role']) {
                     $fields[] = self::field('L\'animation que tu proposes', self::text('animation', true, true, 1000, $typed('animation', $rid ? $this->meta($rid, self::META_ANIMATION) : ''), 'Karaoké, art, rig, quiz… tout est bien tant que c\'est interactif'));
                 }
@@ -2804,7 +2823,7 @@ final class Nyassobi_Conventions
                 $select .= sprintf('<option value="%s"%s>%s</option>', esc_attr($value), selected($note['status'], $value, false), esc_html($label));
             }
             $select .= '</select>';
-            printf('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><input type="text" name="nyassobi_conv_notes[%s][note]" value="%s" maxlength="300" class="regular-text"></td><td>%s</td></tr>', esc_html($p['name']), esc_html(self::ROLES[$p['role']] ?? $p['role']), esc_html($this->days_text($post->ID, $p['days']) ?: '—'), esc_html(self::TRAVEL[$p['travel']] ?? $p['travel']), esc_html($p['transport']), esc_html(self::slots_text($p['slots'])), 'staff' !== $p['role'] ? esc_html($p['animation']) : '', esc_html($p['comment']), $select, esc_attr($p['discord_id']), esc_attr($note['note']), $comm_cell);
+            printf('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><input type="text" name="nyassobi_conv_notes[%s][note]" value="%s" maxlength="300" class="regular-text"></td><td>%s</td></tr>', esc_html($p['name']), esc_html(self::ROLES[$p['role']] ?? $p['role']), esc_html($this->days_text($post->ID, $p['days']) ?: '—'), esc_html('staff' === $p['role'] ? (self::TRAVEL[$p['travel']] ?? $p['travel']) : 'à distance'), esc_html($p['transport']), esc_html(self::slots_text($p['slots'])), 'staff' !== $p['role'] ? esc_html($p['animation']) : '', esc_html($p['comment']), $select, esc_attr($p['discord_id']), esc_attr($note['note']), $comm_cell);
         }
         echo '</tbody></table>';
         printf('<p class="description">%s</p>', esc_html__('Décision et note restent internes au CA : elles apparaissent dans le récapitulatif des orgas, jamais pour le volontaire.', 'nyassobi-wp-plugin'));
@@ -2955,7 +2974,7 @@ final class Nyassobi_Conventions
         foreach ($this->volunteers($id) as $p) {
             $note = $notes[$p['discord_id']] ?? [];
             $entry = $comm[$p['discord_id']] ?? ['pronouns' => '', 'languages' => '', 'images' => []];
-            $rows[] = [$p['name'], self::ROLES[$p['role']] ?? $p['role'], implode(', ', array_map([self::class, 'day_label'], $p['days'])), self::TRAVEL[$p['travel']] ?? $p['travel'], $p['transport'], self::slots_text($p['slots']), 'staff' !== $p['role'] ? $p['animation'] : '', $p['comment'], self::STATUSES[$note['status'] ?? ''] ?? '', (string) ($note['note'] ?? ''), $entry['pronouns'], $entry['languages'], implode(' ', array_map(static fn ($image): string => (string) wp_get_attachment_url((int) $image), $entry['images']))];
+            $rows[] = [$p['name'], self::ROLES[$p['role']] ?? $p['role'], implode(', ', array_map([self::class, 'day_label'], $p['days'])), 'staff' === $p['role'] ? (self::TRAVEL[$p['travel']] ?? $p['travel']) : 'à distance', $p['transport'], self::slots_text($p['slots']), 'staff' !== $p['role'] ? $p['animation'] : '', $p['comment'], self::STATUSES[$note['status'] ?? ''] ?? '', (string) ($note['note'] ?? ''), $entry['pronouns'], $entry['languages'], implode(' ', array_map(static fn ($image): string => (string) wp_get_attachment_url((int) $image), $entry['images']))];
         }
         nocache_headers();
         header('Content-Type: text/csv; charset=UTF-8');
