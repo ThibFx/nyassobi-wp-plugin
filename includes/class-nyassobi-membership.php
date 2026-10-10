@@ -1273,37 +1273,44 @@ final class Nyassobi_Membership
     {
         $settings = self::get_settings();
         $board_size = (int) $settings['board_size'];
+        $needed = self::majority($board_size);
         $status = (string) get_post_meta($post_id, self::META_STATUS, true);
         $votes = (array) get_post_meta($post_id, self::META_VOTES, true);
         $tally = self::tally($votes);
-        $count_line = sprintf(
-            '✅ Pour : **%d** · ❌ Contre : **%d** · ⚪ Abstention : **%d**',
-            $tally['pour'],
-            $tally['contre'],
-            $tally['abstention']
-        );
+        $count_line = sprintf('✅ Pour : **%d** · ❌ Contre : **%d** · ⚪ Abstention : **%d**', $tally['pour'], $tally['contre'], $tally['abstention']);
+        $received = ['name' => 'Reçue', 'value' => sprintf('<t:%d:R>', (int) get_post_time('U', true, $post_id)), 'inline' => true];
 
         if (self::STATUS_PENDING === $status) {
             $pseudo = self::escape_markdown((string) get_post_meta($post_id, self::META_PSEUDO, true));
+            // How far from the majority, at a glance.
+            $bar = str_repeat('🟩', min($tally['pour'], $needed)) . str_repeat('⬜', max(0, $needed - $tally['pour']));
+            // Who already voted (not what): makes it easy to remind the others.
+            $voters = array_map(static fn ($id): string => '<@' . preg_replace('/\D/', '', (string) $id) . '>', array_keys($votes));
             $embed = [
-                'title' => sprintf('Nouvelle demande d\'adhésion n°%d', $post_id),
-                'description' => sprintf("Pseudo : **%s**\n\n%s\nIl faut %d voix « pour » sur %d.", $pseudo, $count_line, self::majority($board_size), $board_size),
+                'title' => sprintf('🐾 Nouvelle demande d\'adhésion · n°%d', $post_id),
+                'description' => sprintf("**%s** souhaite rejoindre Nyassobi.\n\n%s  **%d / %d** voix « pour » nécessaires\n%s", $pseudo, $bar, $tally['pour'], $needed, $count_line),
                 'color' => 0xE8622F,
-                'footer' => ['text' => 'Réservé au CA · un vote peut être changé tant que la décision n\'est pas prise'],
+                'fields' => [
+                    $received,
+                    ['name' => sprintf('Ont voté (%d / %d)', count($votes), $board_size), 'value' => $voters ? implode(' ', $voters) : 'Personne pour l\'instant', 'inline' => true],
+                ],
+                'footer' => ['text' => 'Réservé au CA · un vote reste modifiable jusqu\'à la décision · le pseudo disparaît ensuite de ce message'],
             ];
         } else {
             $outcomes = [
-                self::STATUS_ACCEPTED => 'Acceptée · cotisation en attente',
-                self::STATUS_PAID => 'Acceptée · cotisation reçue',
-                self::STATUS_REFUSED => 'Refusée',
-                self::STATUS_LAPSED => 'Acceptée · cotisation non réglée, demande expirée',
-                self::STATUS_EXPIRED => 'Expirée sans décision',
+                self::STATUS_ACCEPTED => ['✅', 'Acceptée · cotisation en attente', 0x0F9D93],
+                self::STATUS_PAID => ['🎉', 'Acceptée · cotisation reçue', 0x248046],
+                self::STATUS_REFUSED => ['❌', 'Refusée', 0x87685C],
+                self::STATUS_LAPSED => ['⌛', 'Acceptée · cotisation non réglée, demande expirée', 0x87685C],
+                self::STATUS_EXPIRED => ['⌛', 'Expirée sans décision', 0x87685C],
             ];
+            [$emoji, $label, $color] = $outcomes[$status] ?? ['•', $status, 0x87685C];
             $note = (string) get_post_meta($post_id, self::META_DISCORD_NOTE, true);
             $embed = [
-                'title' => sprintf('Demande n°%d · %s', $post_id, $outcomes[$status] ?? $status),
+                'title' => sprintf('%s Demande n°%d · %s', $emoji, $post_id, $label),
                 'description' => $count_line . ('' !== $note ? "\n" . $note : ''),
-                'color' => self::STATUS_PAID === $status ? 0x248046 : (self::STATUS_ACCEPTED === $status ? 0x0F9D93 : 0x87685C),
+                'color' => $color,
+                'fields' => [$received],
             ];
         }
 
@@ -1314,13 +1321,19 @@ final class Nyassobi_Membership
                 'style' => $style,
                 'label' => self::VOTE_LABELS[$choice],
                 'custom_id' => sprintf('%s:%d:%s', self::CUSTOM_ID_PREFIX, $post_id, $choice),
-                'disabled' => self::STATUS_PENDING !== $status,
             ];
+        }
+        $components = [];
+        if (self::STATUS_PENDING === $status) {
+            $components[] = ['type' => 1, 'components' => $buttons];
+        } elseif (in_array($status, [self::STATUS_ACCEPTED, self::STATUS_PAID], true)) {
+            // A link, not an action: the bureau opens the request in WordPress.
+            $components[] = ['type' => 1, 'components' => [['type' => 2, 'style' => 5, 'label' => '📂 Ouvrir dans WordPress', 'url' => admin_url('post.php?post=' . $post_id . '&action=edit')]]];
         }
 
         return [
             'embeds' => [$embed],
-            'components' => self::STATUS_PENDING === $status ? [['type' => 1, 'components' => $buttons]] : [],
+            'components' => $components,
             'allowed_mentions' => ['parse' => []],
         ];
     }
@@ -1644,7 +1657,91 @@ final class Nyassobi_Membership
         if ($reply_to_contact && is_email($main['contact_email'] ?? '')) {
             $headers[] = 'Reply-To: Nyassobi <' . $main['contact_email'] . '>';
         }
-        return (bool) wp_mail($to, $subject, implode("\n", $lines), $headers);
+        // Laid out for mail apps that show HTML, with the same text as an
+        // alternative for those that do not.
+        $headers[0] = 'Content-Type: text/html; charset=UTF-8';
+        $text = implode("\n", $lines);
+        $alternative = static function ($mailer) use ($text): void {
+            $mailer->AltBody = $text;
+        };
+        add_action('phpmailer_init', $alternative);
+        try {
+            return (bool) wp_mail($to, $subject, self::email_html($subject, $lines, $reply_to_contact), $headers);
+        } finally {
+            remove_action('phpmailer_init', $alternative);
+        }
+    }
+
+    /** What a button says, from where its link goes. */
+    private static function button_label(string $url): string
+    {
+        $labels = [
+            '/cotisation/' => 'Régler ma cotisation',
+            'rejoindre-discord' => 'Rejoindre le Discord',
+            'discord.gg/' => 'Rejoindre le serveur Discord',
+            'discord.com/invite/' => 'Rejoindre le serveur Discord',
+            'wp-admin/post.php' => 'Ouvrir la demande',
+            'nyassobi-renouvellement' => 'Ouvrir la page du rappel',
+            '/adhesion' => 'Refaire ma demande',
+            '/conventions' => 'Voir les conventions',
+        ];
+        foreach ($labels as $needle => $label) {
+            if (false !== strpos($url, $needle)) {
+                return $label;
+            }
+        }
+
+        return 'Ouvrir le lien';
+    }
+
+    /**
+     * The email as a page: the association's band, the text in paragraphs,
+     * and each line holding only a link turned into a button. Tables and
+     * inline styles: what mail apps understand.
+     *
+     * @param string[] $lines
+     */
+    private static function email_html(string $subject, array $lines, bool $reply_to_contact): string
+    {
+        $orange = '#e8622f';
+        $text_color = '#3a2a22';
+        $blocks = [];
+        $paragraph = [];
+        $flush = static function () use (&$paragraph, &$blocks, $text_color): void {
+            if ($paragraph) {
+                $blocks[] = '<p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:' . $text_color . '">' . implode('<br>', $paragraph) . '</p>';
+                $paragraph = [];
+            }
+        };
+        foreach ($lines as $line) {
+            $line = (string) $line;
+            if ('' === trim($line)) {
+                $flush();
+                continue;
+            }
+            if (preg_match('#^https?://\S+$#', trim($line))) {
+                $flush();
+                $url = esc_url(trim($line));
+                $blocks[] = '<table role="presentation" cellpadding="0" cellspacing="0" style="margin:4px 0 20px"><tr><td style="border-radius:999px;background:' . $orange . '">'
+                    . '<a href="' . $url . '" style="display:inline-block;padding:13px 28px;font-size:16px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:999px">' . esc_html(self::button_label($line)) . '</a>'
+                    . '</td></tr></table>'
+                    . '<p style="margin:0 0 16px;font-size:12px;line-height:1.5;color:#8a7468">Si le bouton ne marche pas : <a href="' . $url . '" style="color:#8a7468;word-break:break-all">' . esc_html(trim($line)) . '</a></p>';
+                continue;
+            }
+            // **bold**, as in the plain-text version.
+            $paragraph[] = (string) preg_replace('/\*\*(.+?)\*\*/u', '<strong>$1</strong>', make_clickable(esc_html($line)));
+        }
+        $flush();
+        $footer = 'Association Nyassobi · e-mail envoyé automatiquement' . ($reply_to_contact ? ' · pour nous écrire, réponds simplement à ce message' : '');
+
+        return '<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' . esc_html($subject) . '</title></head>'
+            . '<body style="margin:0;padding:0;background:#fbf3ec">'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fbf3ec"><tr><td align="center" style="padding:24px 12px">'
+            . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:16px;overflow:hidden;font-family:\'Trebuchet MS\',Arial,sans-serif">'
+            . '<tr><td style="background:' . $orange . ';padding:20px 28px;font-size:26px;font-weight:bold;letter-spacing:1px;color:#ffffff">Nyassobi</td></tr>'
+            . '<tr><td style="padding:28px 28px 12px">' . implode('', $blocks) . '</td></tr>'
+            . '<tr><td style="padding:14px 28px 22px;border-top:1px solid #f1e3d8;font-size:12px;line-height:1.5;color:#8a7468">' . esc_html($footer) . '</td></tr>'
+            . '</table></td></tr></table></body></html>';
     }
 
     public function schedule_purge(): void

@@ -517,7 +517,11 @@ function bac_afficher(): void
         <article class="mail">
           <div class="entete">De <?php echo esc_html($mail['de'] ?? ''); ?> · à <?php echo esc_html($mail['to']); ?> · <?php echo esc_html($mail['date']); ?></div>
           <b><?php echo esc_html($mail['subject']); ?></b>
+          <?php if (false !== stripos($mail['message'], '<html')) : ?>
+            <iframe sandbox title="<?php echo esc_attr($mail['subject']); ?>" srcdoc="<?php echo esc_attr($mail['message']); ?>" style="width:100%;height:560px;border:0;border-radius:8px;background:#fbf3ec"></iframe>
+          <?php else : ?>
           <pre><?php echo esc_html($mail['message']); ?></pre>
+          <?php endif; ?>
         </article>
       <?php endforeach; ?>
     </div>
