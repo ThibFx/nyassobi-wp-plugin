@@ -275,15 +275,17 @@ Tout passe par Tailscale, en HTTPS ; les conteneurs n'écoutent que sur la Pi. U
 sur la Pi :
 
 ```bash
-sudo tailscale serve --bg --https=443 http://127.0.0.1:8507
+sudo tailscale serve --bg --https=8444 http://127.0.0.1:8507
 sudo tailscale serve --bg --https=8443 http://127.0.0.1:8506
 sudo tailscale funnel --bg --https=10000 --set-path=/wp-json/nyassobi/v1/discord http://127.0.0.1:8506/wp-json/nyassobi/v1/discord
 sudo tailscale funnel --bg --https=10000 --set-path=/wp-json/nyassobi/v1/helloasso http://127.0.0.1:8506/wp-json/nyassobi/v1/helloasso
 ```
 
-- `https://<nom Tailscale de la Pi>` : la copie du site ; `:8443` : l'administration WordPress
+- `https://<nom Tailscale de la Pi>:8444` : la copie du site ; `:8443` : l'administration WordPress
   (identifiants et mot de passe du bureau dans `~/nyassobi-preprod/IDENTIFIANTS.txt`).
-- Seules les deux adresses du port 10000 sont publiques : c'est celle de `/discord` qu'il faut
+- Le port 443 de la Pi est réservé aux webhooks Twitch de l'observatoire VTuber, public : la
+  copie du site ne peut donc pas y être servie sans devenir publique elle aussi.
+- Côté préprod, seules les deux adresses du port 10000 sont publiques : c'est celle de `/discord` qu'il faut
   donner à Discord comme « Interactions Endpoint URL », et celle de `/helloasso` à HelloAsso
   comme adresse de notification.
 - `~/nyassobi-preprod/.env` (sur la Pi, jamais dans Git) : compte d'envoi des e-mails

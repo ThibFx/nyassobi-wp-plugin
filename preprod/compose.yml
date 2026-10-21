@@ -4,9 +4,10 @@
 #
 # Les conteneurs n'écoutent que sur la Pi elle-même (127.0.0.1) : on les
 # atteint uniquement par Tailscale (voir README, « Pré-production »).
-#   https://<nom tailscale de la pi>        copie du site       (Tailscale)
+#   https://<nom tailscale de la pi>:8444   copie du site       (Tailscale)
 #   https://<nom tailscale de la pi>:8443   WordPress            (Tailscale)
 #   https://<nom tailscale de la pi>:10000  Discord et HelloAsso (public, deux adresses)
+# Le port 443 est public: il reçoit les webhooks Twitch de l'observatoire VTuber.
 #
 # Les réglages propres à la Pi (nom, compte d'envoi des e-mails, adresses
 # autorisées) sont dans .env, à côté de ce fichier, jamais dans Git.

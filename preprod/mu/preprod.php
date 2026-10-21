@@ -38,8 +38,10 @@ const PREPROD_JOURNAL = 'preprod_mails_bloques';
 // Assez de demandes par heure pour enchaîner les essais.
 add_filter('nyassobi_membership_submissions_per_hour', static fn (): int => 30);
 
-// Les liens des e-mails renvoient vers la copie du site de pré-production.
-add_filter('nyassobi_membership_site_url', static fn (): string => 'https://' . getenv('PREPROD_HOTE'));
+// Les liens des e-mails renvoient vers la copie du site de pré-production,
+// servie sur le port 8444: le 443 de la Pi reçoit les webhooks Twitch de
+// l'observatoire, et Funnel rend public tout un port à la fois.
+add_filter('nyassobi_membership_site_url', static fn (): string => 'https://' . getenv('PREPROD_HOTE') . ':8444');
 
 /** Les e-mails partent par le compte SMTP renseigné dans .env sur la Pi. */
 add_action('phpmailer_init', static function ($mailer): void {
